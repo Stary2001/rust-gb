@@ -57,7 +57,7 @@ pub enum CPUFlag
 	Zero = 1 << 7,
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub enum InstrFlag
 {
 	None = 0,
@@ -73,8 +73,11 @@ pub enum Instr
 	LoadImm16(Reg16, u16),
 	LoadReg8(Reg8, Reg8),
 	LoadReg16(Reg16, Reg16),
-	LoadDeref8(Reg8, Reg8, InstrFlag),
-	StoreDeref8(Reg8, Reg8, InstrFlag),
+	LoadDeref8(Reg8, Reg16, InstrFlag),
+	StoreDeref8(Reg16, Reg8, InstrFlag),
+	LoadDerefImm(u16, Reg8),
+	StoreDerefImm(u16, Reg8),
+
 	Inc8(Reg8),
 	Dec8(Reg8),
 	Inc16(Reg16),
@@ -100,7 +103,12 @@ pub enum Instr
 	Srl(Reg8),
 	Bit(u8, Reg8),
 
+	Call(u16),
+	Ret(),
 	JrNotFlag(u8, CPUFlag),
+
+	Push(Reg16),
+	Pop(Reg16),
 
 	Halt(),
 	WriteIOImmOff(u8),
@@ -114,6 +122,7 @@ impl Instr
 	{
 		match i
 		{
+			Rl(Reg8::A) => 1,
 			Instr::LoadImm8(_, _) => 2,
 			Instr::LoadImm16(_, _) => 3,
 			JrNotFlag(_, _) => 2,
@@ -126,6 +135,8 @@ impl Instr
 			Swap(_) |
 			Srl(_) |
 			Bit(_, _) => 2,
+
+			Call(_) => 3,
 
 			_ => 1
 		}
@@ -141,36 +152,70 @@ impl CPU
 		let i:Instr = self.decode();
 		let mut jumped: bool = false;
 
-		println!("Instr: {:?}", i);
+		println!("Instr: {:?} at pc {:x}", i, self.regs.pc);
 		match i
 		{
 			LoadImm8(r, i) => { self.regs.set8(r, i) },
 			LoadImm16(r, i) => { self.regs.set16(r, i) },
 			LoadReg8(to, from) => { let v = self.regs.get8(from); self.regs.set8(to, v) },
 			LoadReg16(to, from) => { let v = self.regs.get16(from); self.regs.set16(to, v) },
-			LoadDeref8(_, from, flag) => {
-											let hl = self.regs.get16(Reg16::HL);
-											let v = self.mmu.read8(hl);
+			LoadDeref8(from, reg, flag) => {
+											let mut loc = self.regs.get16(reg);
+											
+
+											let v = self.mmu.read8(loc);
 											self.regs.set8(from, v);
-											match flag
+
+											if flag == InstrFlag::Dec
 											{
-												InstrFlag::Inc => self.regs.set16(Reg16::HL, hl + 1),
-												InstrFlag::Dec => self.regs.set16(Reg16::HL, hl - 1),
-												InstrFlag::None => ()
-											};
+												loc -= 1;
+											}
+											if flag == InstrFlag::Inc
+											{
+												loc += 1;
+											}
+
+											if flag != InstrFlag::None
+											{
+												self.regs.set16(reg, loc);
+											}
 										},
 
-			StoreDeref8(to, _, flag) => {
+			StoreDeref8(reg, to, flag) => {
 											let v = self.regs.get8(to);
-											let hl = self.regs.get16(Reg16::HL);
-											self.mmu.write8(hl, v);
-											match flag
+											let mut loc = self.regs.get16(reg);
+											
+											self.mmu.write8(loc, v);
+
+											if flag == InstrFlag::Dec
 											{
-												InstrFlag::Inc => self.regs.set16(Reg16::HL, hl + 1),
-												InstrFlag::Dec => self.regs.set16(Reg16::HL, hl - 1),
-												InstrFlag::None => ()
-											};
+												loc -= 1;
+											}
+											
+											if flag == InstrFlag::Inc
+											{
+												loc += 1;
+											}
+
+											if flag != InstrFlag::None
+											{
+												self.regs.set16(reg, loc);
+											}
 										},
+			Call(off) =>
+			{
+				let pc = self.regs.pc;
+				self.push(pc);
+				self.regs.pc = off;
+				jumped = true;
+			},
+
+			Ret() =>
+			{
+				let pc = self.pop();
+				self.regs.pc = pc;
+				jumped = true;
+			}
 
 			JrNotFlag(off, flag) =>
 			{
@@ -192,7 +237,8 @@ impl CPU
 					jumped = true;
 				}
 			}
-			Inc8(r) => { let v = self.regs.get8(r); self.regs.set8(r, v+1); }
+			Inc8(r) => { let v = self.regs.get8(r); self.regs.set8(r, v+1); },
+			Inc16(r) => { let v = self.regs.get16(r); self.regs.set16(r, v+1); },
 			// Add()
 			// Adc()
 			// Sub()
@@ -200,10 +246,31 @@ impl CPU
 			// And()
 			Xor(r) => { let v = self.regs.get8(Reg8::A); let vv = self.regs.get8(r); self.regs.set8(Reg8::A, v ^ vv)},
 
-			Bit(n, r) => { let v = self.regs.get8(r); if v & (1 << n) == (1 << n) { self.regs.clear_flag(CPUFlag::Zero); } else { self.regs.set_flag(CPUFlag::Zero); } },
+			Rl(r) => 
+			{
+				let mut v = self.regs.get8(r);
+				let set_carry = v & 0x80 == 0x80;
+				v = (v << 1);
+				if self.regs.test_flag(CPUFlag::Carry)
+				{
+					v |= 1;
+				}
+				self.regs.set_flag(CPUFlag::Carry, set_carry)
+			},
+
+			Bit(n, r) =>
+			{
+				let v = self.regs.get8(r);
+				let f = (v & (1 << n) == (1 << n));
+				println!("{} {} {}", f, v, 1<<n);
+				self.regs.set_flag(CPUFlag::Zero, !f);
+			},
 
 			WriteIOImmOff(off) => self.mmu.write8(0xff00 + off as u16, self.regs.get8(Reg8::A)),
 			WriteIORegOff() => self.mmu.write8(0xff00 + self.regs.get8(Reg8::C) as u16, self.regs.get8(Reg8::A)),
+
+			Push(reg) => { let v = self.regs.get16(reg); self.push(v); },
+			Pop(reg) => { let v = self.pop(); self.regs.set16(reg, v); },
 
 			Instr::Invalid(aa) => panic!("Invalid instr 0x{:x}", aa),
 			_ => panic!("Unimplemented instr!!")
@@ -236,6 +303,7 @@ impl CPU
 			0x06 | 0x16 | 0x26 | 0x36 => LoadImm8(reg_lut[(((i & 0xf0) >> 4) * 2) as usize], self.mmu.read8(self.regs.pc + 1)),
 
 			0x08 | 0x18 | 0x28 | 0x38 => Add16(reg16_lut[((i & 0xf0) >> 4) as usize]),
+			0x0a | 0x1a => LoadDeref8(Reg8::A, reg16_lut[((i & 0xf0) >> 4) as usize], InstrFlag::None),
 			0x0b | 0x1b | 0x2b | 0x3b => Dec16(reg16_lut[((i & 0xf0) >> 4) as usize]),
 
 			0x0c | 0x1c | 0x2c | 0x3c => Inc8(reg_lut[(((i & 0xf0) >> 4) * 2 + 1) as usize]),
@@ -243,16 +311,18 @@ impl CPU
 
 			0x0e | 0x1e | 0x2e | 0x3e => LoadImm8(reg_lut[(((i & 0xf0) >> 4) * 2 + 1) as usize], self.mmu.read8(self.regs.pc + 1)),
 
+			0x17 => Rl(Reg8::A),
+
 			0x20 => JrNotFlag(self.mmu.read8(self.regs.pc + 1), CPUFlag::Zero),
 			0x30 => JrNotFlag(self.mmu.read8(self.regs.pc + 1), CPUFlag::Carry),
 
 			// \/ gameboy specific ldi (HL), A / ldi A, (HL)
-			0x22 => StoreDeref8(Reg8::A, Reg8::DerefHL, InstrFlag::Inc),
-			0x2a => LoadDeref8(Reg8::A, Reg8::DerefHL, InstrFlag::Inc),
+			0x22 => StoreDeref8(Reg16::HL, Reg8::A, InstrFlag::Inc),
+			0x2a => LoadDeref8(Reg8::A, Reg16::HL, InstrFlag::Inc),
 
 			// \/ gameboy specific ldd (HL), A / ldd A, (HL)
-			0x32 => StoreDeref8(Reg8::A, Reg8::DerefHL, InstrFlag::Dec),
-			0x3a => LoadDeref8(Reg8::A, Reg8::DerefHL, InstrFlag::Dec),
+			0x32 => StoreDeref8(Reg16::HL, Reg8::A, InstrFlag::Dec),
+			0x3a => LoadDeref8(Reg8::A, Reg16::HL, InstrFlag::Dec),
 
 			// b/c load
 			0x40...0x47 => LoadReg8(Reg8::B, reg_lut[(i&0x0f) as usize]),
@@ -268,7 +338,7 @@ impl CPU
 			
 			// (hl) / a load
 			0x76 => Halt(),
-			0x70...0x75 | 0x77 => StoreDeref8(reg_lut[(i&0x0f) as usize], Reg8::DerefHL, InstrFlag::None),
+			0x70...0x75 | 0x77 => StoreDeref8(Reg16::HL, reg_lut[(i&0x0f) as usize], InstrFlag::None),
 			0x78...0x7f => LoadReg8(Reg8::C, reg_lut[(i&0x0f - 8) as usize]),
 
 			// ADDs / ADCs
@@ -286,6 +356,13 @@ impl CPU
 			// ORs / CPs
 			0xb0...0xb7 => Or(reg_lut[(i&0x0f) as usize]),
 			0xb8...0xbf => Cp(reg_lut[(i&0x0f - 8) as usize]),
+
+			0xc1 | 0xd1 | 0xe1 => Pop(reg16_lut[(((i&0xf0) >> 4)- 0xc) as usize]),
+			0xf1 => Pop(Reg16::AF),
+
+			0xc5 | 0xd5 | 0xe5 => Push(reg16_lut[(((i&0xf0) >> 4)- 0xc) as usize]),
+			0xf5 => Push(Reg16::AF),
+
 
 			0xcb => 
 			{
@@ -313,6 +390,9 @@ impl CPU
 				}
 			},
 
+			0xc9 => Ret(),
+			0xcd => Call(self.mmu.read16(self.regs.pc + 1)),
+
 			0xe0 => WriteIOImmOff(self.mmu.read8(self.regs.pc + 1)),
 			0xe2 => WriteIORegOff(),
 
@@ -320,17 +400,36 @@ impl CPU
 		}
 	}
 
+	fn push(&mut self, v: u16)
+	{
+		self.regs.sp -= 2;
+		self.mmu.write16(self.regs.sp, v)
+	}
+
+	fn pop(&mut self) -> u16
+	{
+		let v = self.mmu.read16(self.regs.sp);
+		self.regs.sp += 2;
+		v
+	}
 
 	pub fn new() -> CPU
 	{
+		let mut vram = Vec::with_capacity(0x2000);
+		vram.resize(0x2000, 0);
+		let mut wram = Vec::with_capacity(0x2000);
+		wram.resize(0x2000, 0);
+		let mut hram = Vec::with_capacity(0x7f);
+		hram.resize(0x7f, 0);
+
 		CPU
 		{
 			regs: CPURegs{a: 0, b: 0, c: 0, d: 0, e: 0, h: 0, l: 0, f: 0, sp: 0, pc: 0},
 			mmu: MemMapper
 			{
-				vram: MemRegion::Block(Vec::with_capacity(0x2000)), // 8k vram
-				wram: MemRegion::Block(Vec::with_capacity(0x2000)), // 8k wram
-				hram: MemRegion::Block(Vec::with_capacity(0x80)),
+				vram: MemRegion::ReadWrite(0x8000, vram), // 8k vram
+				wram: MemRegion::ReadWrite(0xc000, wram), // 8k wram
+				hram: MemRegion::ReadWrite(0xff80, hram),
 				cart: MemRegion::Empty,
 				bios: MemRegion::Empty,
 				bios_enabled: true,
@@ -406,13 +505,15 @@ impl CPURegs
 		self.f & (flag as u8) == (flag as u8)
 	}
 
-	pub fn set_flag(&mut self, flag: CPUFlag)
+	pub fn set_flag(&mut self, flag: CPUFlag, state: bool)
 	{
-		self.f |= flag as u8;
-	}
-
-	pub fn clear_flag(&mut self, flag: CPUFlag)
-	{
-		self.f &= !(flag as u8);
+		if state == true
+		{
+			self.f |= flag as u8;
+		}
+		else
+		{
+			self.f &= !(flag as u8);
+		}
 	}
 }
