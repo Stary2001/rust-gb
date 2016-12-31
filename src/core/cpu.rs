@@ -1,5 +1,6 @@
 use core::mem::MemMapper;
 use core::mem::MemRegion;
+use core::mem::IOHandler;
 use std::ops::*;
 use std::fmt::Display;
 use std::fmt;
@@ -76,7 +77,7 @@ pub enum Instr
 	LoadDeref8(Reg8, Reg16, InstrFlag),
 	StoreDeref8(Reg16, Reg8, InstrFlag),
 	LoadDerefImm(u16, Reg8),
-	StoreDerefImm(u16, Reg8),
+	StoreDerefImm(Reg8, u16),
 
 	Inc8(Reg8),
 	Dec8(Reg8),
@@ -84,7 +85,6 @@ pub enum Instr
 	Dec16(Reg16),
 
 	Add(Reg8),
-	Add16(Reg16),
 	AddCarry(Reg8),
 	Sub(Reg8),
 	SubCarry(Reg8),
@@ -92,6 +92,7 @@ pub enum Instr
 	Xor(Reg8),
 	Or(Reg8),
 	Cp(Reg8),
+	CpImm(u8),
 
 	Rlc(Reg8),
 	Rrc(Reg8),
@@ -105,14 +106,17 @@ pub enum Instr
 
 	Call(u16),
 	Ret(),
-	JrNotFlag(u8, CPUFlag),
+	Jr(u8),
+	JrFlag(u8, CPUFlag, bool),
 
 	Push(Reg16),
 	Pop(Reg16),
 
 	Halt(),
-	WriteIOImmOff(u8),
-	WriteIORegOff(),
+	HiReadReg(),
+	HiReadImm(u8),
+	HiWriteImm(u8),
+	HiWriteReg(),
 	Invalid(u16)
 }
 
@@ -125,7 +129,7 @@ impl Instr
 			Rl(Reg8::A) => 1,
 			Instr::LoadImm8(_, _) => 2,
 			Instr::LoadImm16(_, _) => 3,
-			JrNotFlag(_, _) => 2,
+			JrFlag(_, _, _) | Jr(_) => 2,
 			Rlc(_) |
 			Rrc(_) |
 			Rl(_) |
@@ -137,7 +141,9 @@ impl Instr
 			Bit(_, _) => 2,
 
 			Call(_) => 3,
-
+			CpImm(_) => 2,
+			LoadDerefImm(_, _) |
+			StoreDerefImm(_, _) => 3,
 			_ => 1
 		}
 	}
@@ -147,9 +153,8 @@ use core::cpu::Instr::*;
 
 impl CPU
 {
-	pub fn step(&mut self)
+	pub fn exec(&mut self, i: Instr)
 	{
-		let i:Instr = self.decode();
 		let mut jumped: bool = false;
 
 		println!("Instr: {:?} at pc {:x}", i, self.regs.pc);
@@ -199,13 +204,26 @@ impl CPU
 
 											if flag != InstrFlag::None
 											{
+												println!("inc/dec {:?} -> {:x}", reg, loc);
 												self.regs.set16(reg, loc);
 											}
 										},
+			LoadDerefImm(imm, reg) => 
+			{
+				let v = self.mmu.read8(imm);
+				self.regs.set8(reg, v);
+			},
+
+			StoreDerefImm(reg, imm) =>
+			{
+				let v = self.regs.get8(reg);
+				self.mmu.write8(imm, v);
+			},
+
 			Call(off) =>
 			{
 				let pc = self.regs.pc;
-				self.push(pc);
+				self.push(pc + 3);
 				self.regs.pc = off;
 				jumped = true;
 			},
@@ -217,28 +235,42 @@ impl CPU
 				jumped = true;
 			}
 
-			JrNotFlag(off, flag) =>
+			JrFlag(off, flag, expected) =>
 			{
-				if !self.regs.test_flag(flag)
+				if self.regs.test_flag(flag) == expected
 				{
-					let mut pc = self.regs.get16(Reg16::PC);
-					pc += 2;
-					let off_ = off as i8;
-					if off_ > 0
-					{
-						pc += off as u16;
-					}
-					else
-					{
-						pc -= (-off_) as u16;
-					}
-					self.regs.set16(Reg16::PC, pc);
-
+					self.exec(Jr(off));
 					jumped = true;
 				}
 			}
-			Inc8(r) => { let v = self.regs.get8(r); self.regs.set8(r, v+1); },
-			Inc16(r) => { let v = self.regs.get16(r); self.regs.set16(r, v+1); },
+
+			Jr(off) =>
+			{
+				let mut pc = self.regs.get16(Reg16::PC);
+				pc += 2;
+				let off_ = off as i8;
+				if off_ > 0
+				{
+					pc += off as u16;
+				}
+				else
+				{
+					pc -= (-off_) as u16;
+				}
+				self.regs.set16(Reg16::PC, pc);
+
+				jumped = true;
+			}
+
+			Inc8(r) => { let v = self.regs.get8(r); self.regs.set8(r, v+1); self.regs.set_flag(CPUFlag::Zero, v == 0xff); },
+			Inc16(r) => { let v = self.regs.get16(r); self.regs.set16(r, v+1); self.regs.set_flag(CPUFlag::Zero, v == 0xff); },
+			Dec8(r) => { let v = self.regs.get8(r); self.regs.set8(r, v-1); self.regs.set_flag(CPUFlag::Zero, v == 1); },
+			Dec16(r) => { let v = self.regs.get16(r); self.regs.set16(r, v-1); self.regs.set_flag(CPUFlag::Zero, v == 1); },
+
+			CpImm(imm) => {
+				let v = self.regs.get8(Reg8::A);
+				self.regs.set_flag(CPUFlag::Zero, v == imm);	
+			}
 			// Add()
 			// Adc()
 			// Sub()
@@ -266,8 +298,20 @@ impl CPU
 				self.regs.set_flag(CPUFlag::Zero, !f);
 			},
 
-			WriteIOImmOff(off) => self.mmu.write8(0xff00 + off as u16, self.regs.get8(Reg8::A)),
-			WriteIORegOff() => self.mmu.write8(0xff00 + self.regs.get8(Reg8::C) as u16, self.regs.get8(Reg8::A)),
+			HiReadImm(off) =>
+			{
+				let v = self.mmu.read8(0xff00 + off as u16);
+				self.regs.set8(Reg8::A, v);
+			},
+
+			HiReadReg() => 
+			{
+				let v = self.mmu.read8(0xff00 + self.regs.get8(Reg8::C) as u16);
+				self.regs.set8(Reg8::A, v);
+			},
+
+			HiWriteImm(off) => self.mmu.write8(0xff00 + off as u16, self.regs.get8(Reg8::A)),
+			HiWriteReg() => self.mmu.write8(0xff00 + self.regs.get8(Reg8::C) as u16, self.regs.get8(Reg8::A)),
 
 			Push(reg) => { let v = self.regs.get16(reg); self.push(v); },
 			Pop(reg) => { let v = self.pop(); self.regs.set16(reg, v); },
@@ -301,8 +345,6 @@ impl CPU
 			0x05 | 0x15 | 0x25 | 0x35 => Dec8(reg_lut[(((i & 0xf0) >> 4) * 2) as usize]),
 
 			0x06 | 0x16 | 0x26 | 0x36 => LoadImm8(reg_lut[(((i & 0xf0) >> 4) * 2) as usize], self.mmu.read8(self.regs.pc + 1)),
-
-			0x08 | 0x18 | 0x28 | 0x38 => Add16(reg16_lut[((i & 0xf0) >> 4) as usize]),
 			0x0a | 0x1a => LoadDeref8(Reg8::A, reg16_lut[((i & 0xf0) >> 4) as usize], InstrFlag::None),
 			0x0b | 0x1b | 0x2b | 0x3b => Dec16(reg16_lut[((i & 0xf0) >> 4) as usize]),
 
@@ -312,9 +354,11 @@ impl CPU
 			0x0e | 0x1e | 0x2e | 0x3e => LoadImm8(reg_lut[(((i & 0xf0) >> 4) * 2 + 1) as usize], self.mmu.read8(self.regs.pc + 1)),
 
 			0x17 => Rl(Reg8::A),
+			0x18 => Jr(self.mmu.read8(self.regs.pc + 1)),
+			0x20 => JrFlag(self.mmu.read8(self.regs.pc + 1), CPUFlag::Zero, false),
+			0x30 => JrFlag(self.mmu.read8(self.regs.pc + 1), CPUFlag::Carry, false),
 
-			0x20 => JrNotFlag(self.mmu.read8(self.regs.pc + 1), CPUFlag::Zero),
-			0x30 => JrNotFlag(self.mmu.read8(self.regs.pc + 1), CPUFlag::Carry),
+			0x28 => JrFlag(self.mmu.read8(self.regs.pc + 1), CPUFlag::Zero, true),
 
 			// \/ gameboy specific ldi (HL), A / ldi A, (HL)
 			0x22 => StoreDeref8(Reg16::HL, Reg8::A, InstrFlag::Inc),
@@ -393,8 +437,12 @@ impl CPU
 			0xc9 => Ret(),
 			0xcd => Call(self.mmu.read16(self.regs.pc + 1)),
 
-			0xe0 => WriteIOImmOff(self.mmu.read8(self.regs.pc + 1)),
-			0xe2 => WriteIORegOff(),
+			0xe0 => HiWriteImm(self.mmu.read8(self.regs.pc + 1)),
+			0xe2 => HiWriteReg(),
+			0xea => StoreDerefImm(Reg8::A, self.mmu.read16(self.regs.pc + 1)),
+			0xf0 => HiReadImm(self.mmu.read8(self.regs.pc + 1)),
+			0xfa => LoadDerefImm(self.mmu.read16(self.regs.pc + 1), Reg8::A),
+			0xfe => CpImm(self.mmu.read8(self.regs.pc + 1)),
 
 			_ => Instr::Invalid(i as u16),
 		}
@@ -433,6 +481,7 @@ impl CPU
 				cart: MemRegion::Empty,
 				bios: MemRegion::Empty,
 				bios_enabled: true,
+				io: MemRegion::IO(0xff00, IOHandler{})
 			}
 		}
 	}
