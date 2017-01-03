@@ -4,6 +4,7 @@ use core::mem::ROMBlock;
 use core::mem::EmptyBlock;
 
 use core::ppu::PPU;
+use core::sound::Sound;
 
 use std::ops::*;
 use std::fmt::Display;
@@ -33,6 +34,7 @@ pub struct CPU
 	pub cart: Option<ROMBlock>,
 	pub bios: Option<ROMBlock>, // BIOS will shadow the first part of cart when enabled
 	pub bios_enabled: bool,
+	pub sound: Sound,
 	pub ppu: PPU,
 }
 
@@ -480,6 +482,7 @@ impl CPU
 			0...0xff => { if self.bios_enabled { &self.bios } else { &self.cart } }
 			0x100 ... 0x3fff => &self.cart,
 			0x8000 ... 0x9fff => &self.vram,
+			0xff10...0xff26 => &self.sound,
 			0xff40...0xff49 => &self.ppu,
 			0xff80...0xfffe => &self.hram,
 			_ => panic!("unmapped mem access at 0x{:x}", loc)
@@ -493,7 +496,8 @@ impl CPU
 			0...0xff => { if self.bios_enabled { &mut self.bios } else { &mut self.cart } }
 			0x100 ... 0x3fff => &mut self.cart,
 			0x8000 ... 0x9fff => &mut self.vram,
-			0xff00...0xff7f => &mut self.ppu,
+			0xff10...0xff26 => &mut self.sound,
+			0xff40...0xff49 => &mut self.ppu,
 			0xff80...0xfffe => &mut self.hram,
 			_ => panic!("unmapped mem access at 0x{:x}", loc)
 		}
@@ -514,14 +518,17 @@ impl CPU
 	pub fn read16(&self, loc: u16) -> u16
 	{
 		let r = self.map(loc);
-		r.read8(loc) as u16 | (r.read8(loc + 1) as u16) << 8
+		let a: u16 = r.read8(loc) as u16 | (r.read8(loc + 1) as u16) << 8;
+		println!("Read16 at 0x{:x} => 0x{:x}", loc, a);
+		a
 	}
 
 	pub fn write16(&mut self, loc: u16, v: u16)
 	{
+		println!("Write16 at 0x{:x}, 0x{}", loc, v);
 		let r = self.map_mut(loc);
 		r.write8(loc, (v & 0xff) as u8);
-		r.write8(loc, ((v & 0xff00) >> 8) as u8);
+		r.write8(loc + 1, ((v & 0xff00) >> 8) as u8);
 	}
 
 	pub fn new() -> CPU
@@ -544,6 +551,7 @@ impl CPU
 			bios: None,
 			bios_enabled: true,
 			ppu: PPU{},
+			sound: Sound{}
 		};
 
 		c
