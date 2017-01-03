@@ -1,6 +1,10 @@
-use core::mem::MemMapper;
-use core::mem::MemRegion;
-use core::mem::IOHandler;
+use core::mem::MemBlock;
+use core::mem::RAMBlock;
+use core::mem::ROMBlock;
+use core::mem::EmptyBlock;
+
+use core::ppu::PPU;
+
 use std::ops::*;
 use std::fmt::Display;
 use std::fmt;
@@ -23,7 +27,13 @@ struct CPURegs
 pub struct CPU
 {
 	regs: CPURegs,
-	pub mmu: MemMapper,
+	pub vram: RAMBlock,
+	pub wram: RAMBlock,
+	pub hram: RAMBlock,
+	pub cart: Option<ROMBlock>,
+	pub bios: Option<ROMBlock>, // BIOS will shadow the first part of cart when enabled
+	pub bios_enabled: bool,
+	pub ppu: PPU,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -168,7 +178,7 @@ impl CPU
 											let mut loc = self.regs.get16(reg);
 											
 
-											let v = self.mmu.read8(loc);
+											let v = self.read8(loc);
 											self.regs.set8(from, v);
 
 											if flag == InstrFlag::Dec
@@ -190,7 +200,7 @@ impl CPU
 											let v = self.regs.get8(to);
 											let mut loc = self.regs.get16(reg);
 											
-											self.mmu.write8(loc, v);
+											self.write8(loc, v);
 
 											if flag == InstrFlag::Dec
 											{
@@ -210,14 +220,14 @@ impl CPU
 										},
 			LoadDerefImm(imm, reg) => 
 			{
-				let v = self.mmu.read8(imm);
+				let v = self.read8(imm);
 				self.regs.set8(reg, v);
 			},
 
 			StoreDerefImm(reg, imm) =>
 			{
 				let v = self.regs.get8(reg);
-				self.mmu.write8(imm, v);
+				self.write8(imm, v);
 			},
 
 			Call(off) =>
@@ -300,18 +310,19 @@ impl CPU
 
 			HiReadImm(off) =>
 			{
-				let v = self.mmu.read8(0xff00 + off as u16);
+				let v = self.read8(0xff00 + off as u16);
 				self.regs.set8(Reg8::A, v);
 			},
 
 			HiReadReg() => 
 			{
-				let v = self.mmu.read8(0xff00 + self.regs.get8(Reg8::C) as u16);
+				let v = self.read8(0xff00 + self.regs.get8(Reg8::C) as u16);
 				self.regs.set8(Reg8::A, v);
 			},
 
-			HiWriteImm(off) => self.mmu.write8(0xff00 + off as u16, self.regs.get8(Reg8::A)),
-			HiWriteReg() => self.mmu.write8(0xff00 + self.regs.get8(Reg8::C) as u16, self.regs.get8(Reg8::A)),
+			HiWriteImm(off) => { let v  = self.regs.get8(Reg8::A); self.write8(0xff00 + off as u16, v) },
+
+			HiWriteReg() => { let v  = self.regs.get8(Reg8::A); let off = self.regs.get8(Reg8::C); self.write8(0xff00 + off as u16, v) },
 
 			Push(reg) => { let v = self.regs.get16(reg); self.push(v); },
 			Pop(reg) => { let v = self.pop(); self.regs.set16(reg, v); },
@@ -328,7 +339,7 @@ impl CPU
 
 	pub fn decode(&self) -> Instr
 	{
-		let i: u8 = self.mmu.read8(self.regs.pc);
+		let i: u8 = self.read8(self.regs.pc);
 
 		let reg_lut: Vec<Reg8> = vec![Reg8::B, Reg8::C, Reg8::D, Reg8::E, Reg8::H, Reg8::L, Reg8::DerefHL, Reg8::A];
 		let reg16_lut: Vec<Reg16> = vec![Reg16::BC, Reg16::DE, Reg16::HL, Reg16::SP];
@@ -338,27 +349,27 @@ impl CPU
 			0x00 => Nop(),
 
 			// load imm 16
-			0x01 | 0x11 | 0x21 | 0x31 => LoadImm16(reg16_lut[((i & 0xf0) >> 4) as usize], self.mmu.read16(self.regs.pc + 1)),
+			0x01 | 0x11 | 0x21 | 0x31 => LoadImm16(reg16_lut[((i & 0xf0) >> 4) as usize], self.read16(self.regs.pc + 1)),
 
 			0x03 | 0x13 | 0x23 | 0x33 => Inc16(reg16_lut[((i & 0xf0) >> 4) as usize]),
 			0x04 | 0x14 | 0x24 | 0x34 => Inc8(reg_lut[(((i & 0xf0) >> 4) * 2) as usize]),
 			0x05 | 0x15 | 0x25 | 0x35 => Dec8(reg_lut[(((i & 0xf0) >> 4) * 2) as usize]),
 
-			0x06 | 0x16 | 0x26 | 0x36 => LoadImm8(reg_lut[(((i & 0xf0) >> 4) * 2) as usize], self.mmu.read8(self.regs.pc + 1)),
+			0x06 | 0x16 | 0x26 | 0x36 => LoadImm8(reg_lut[(((i & 0xf0) >> 4) * 2) as usize], self.read8(self.regs.pc + 1)),
 			0x0a | 0x1a => LoadDeref8(Reg8::A, reg16_lut[((i & 0xf0) >> 4) as usize], InstrFlag::None),
 			0x0b | 0x1b | 0x2b | 0x3b => Dec16(reg16_lut[((i & 0xf0) >> 4) as usize]),
 
 			0x0c | 0x1c | 0x2c | 0x3c => Inc8(reg_lut[(((i & 0xf0) >> 4) * 2 + 1) as usize]),
 			0x0d | 0x1d | 0x2d | 0x3d => Dec8(reg_lut[(((i & 0xf0) >> 4) * 2 + 1) as usize]),
 
-			0x0e | 0x1e | 0x2e | 0x3e => LoadImm8(reg_lut[(((i & 0xf0) >> 4) * 2 + 1) as usize], self.mmu.read8(self.regs.pc + 1)),
+			0x0e | 0x1e | 0x2e | 0x3e => LoadImm8(reg_lut[(((i & 0xf0) >> 4) * 2 + 1) as usize], self.read8(self.regs.pc + 1)),
 
 			0x17 => Rl(Reg8::A),
-			0x18 => Jr(self.mmu.read8(self.regs.pc + 1)),
-			0x20 => JrFlag(self.mmu.read8(self.regs.pc + 1), CPUFlag::Zero, false),
-			0x30 => JrFlag(self.mmu.read8(self.regs.pc + 1), CPUFlag::Carry, false),
+			0x18 => Jr(self.read8(self.regs.pc + 1)),
+			0x20 => JrFlag(self.read8(self.regs.pc + 1), CPUFlag::Zero, false),
+			0x30 => JrFlag(self.read8(self.regs.pc + 1), CPUFlag::Carry, false),
 
-			0x28 => JrFlag(self.mmu.read8(self.regs.pc + 1), CPUFlag::Zero, true),
+			0x28 => JrFlag(self.read8(self.regs.pc + 1), CPUFlag::Zero, true),
 
 			// \/ gameboy specific ldi (HL), A / ldi A, (HL)
 			0x22 => StoreDeref8(Reg16::HL, Reg8::A, InstrFlag::Inc),
@@ -410,7 +421,7 @@ impl CPU
 
 			0xcb => 
 			{
-				let i = self.mmu.read8(self.regs.pc + 1);
+				let i = self.read8(self.regs.pc + 1);
 				match i
 				{
 					0x00...0x07 => Rlc(reg_lut[(i&0x0f) as usize]),
@@ -435,14 +446,14 @@ impl CPU
 			},
 
 			0xc9 => Ret(),
-			0xcd => Call(self.mmu.read16(self.regs.pc + 1)),
+			0xcd => Call(self.read16(self.regs.pc + 1)),
 
-			0xe0 => HiWriteImm(self.mmu.read8(self.regs.pc + 1)),
+			0xe0 => HiWriteImm(self.read8(self.regs.pc + 1)),
 			0xe2 => HiWriteReg(),
-			0xea => StoreDerefImm(Reg8::A, self.mmu.read16(self.regs.pc + 1)),
-			0xf0 => HiReadImm(self.mmu.read8(self.regs.pc + 1)),
-			0xfa => LoadDerefImm(self.mmu.read16(self.regs.pc + 1), Reg8::A),
-			0xfe => CpImm(self.mmu.read8(self.regs.pc + 1)),
+			0xea => StoreDerefImm(Reg8::A, self.read16(self.regs.pc + 1)),
+			0xf0 => HiReadImm(self.read8(self.regs.pc + 1)),
+			0xfa => LoadDerefImm(self.read16(self.regs.pc + 1), Reg8::A),
+			0xfe => CpImm(self.read8(self.regs.pc + 1)),
 
 			_ => Instr::Invalid(i as u16),
 		}
@@ -451,14 +462,66 @@ impl CPU
 	fn push(&mut self, v: u16)
 	{
 		self.regs.sp -= 2;
-		self.mmu.write16(self.regs.sp, v)
+		let sp = self.regs.sp;
+		self.write16(sp, v)
 	}
 
 	fn pop(&mut self) -> u16
 	{
-		let v = self.mmu.read16(self.regs.sp);
+		let v = self.read16(self.regs.sp);
 		self.regs.sp += 2;
 		v
+	}
+
+	fn map(&self, loc: u16) -> &MemBlock
+	{
+		match loc
+		{
+			0...0xff => { if self.bios_enabled { &self.bios } else { &self.cart } }
+			0x100 ... 0x3fff => &self.cart,
+			0x8000 ... 0x9fff => &self.vram,
+			0xff40...0xff49 => &self.ppu,
+			0xff80...0xfffe => &self.hram,
+			_ => panic!("unmapped mem access at 0x{:x}", loc)
+		}
+	}
+
+	fn map_mut(&mut self, loc: u16) -> &mut MemBlock
+	{
+		match loc
+		{
+			0...0xff => { if self.bios_enabled { &mut self.bios } else { &mut self.cart } }
+			0x100 ... 0x3fff => &mut self.cart,
+			0x8000 ... 0x9fff => &mut self.vram,
+			0xff00...0xff7f => &mut self.ppu,
+			0xff80...0xfffe => &mut self.hram,
+			_ => panic!("unmapped mem access at 0x{:x}", loc)
+		}
+	}
+
+	pub fn read8(&self, loc: u16) -> u8
+	{
+		println!("Read8 at 0x{:x}", loc);
+		return self.map(loc).read8(loc);
+	}
+
+	pub fn write8(&mut self, loc: u16, v: u8)
+	{
+		println!("Write to 0x{:x}: 0x{:x}", loc, v);
+		self.map_mut(loc).write8(loc, v);
+	}
+
+	pub fn read16(&self, loc: u16) -> u16
+	{
+		let r = self.map(loc);
+		r.read8(loc) as u16 | (r.read8(loc + 1) as u16) << 8
+	}
+
+	pub fn write16(&mut self, loc: u16, v: u16)
+	{
+		let r = self.map_mut(loc);
+		r.write8(loc, (v & 0xff) as u8);
+		r.write8(loc, ((v & 0xff00) >> 8) as u8);
 	}
 
 	pub fn new() -> CPU
@@ -470,20 +533,20 @@ impl CPU
 		let mut hram = Vec::with_capacity(0x7f);
 		hram.resize(0x7f, 0);
 
-		CPU
+		let mut c = CPU
 		{
 			regs: CPURegs{a: 0, b: 0, c: 0, d: 0, e: 0, h: 0, l: 0, f: 0, sp: 0, pc: 0},
-			mmu: MemMapper
-			{
-				vram: MemRegion::ReadWrite(0x8000, vram), // 8k vram
-				wram: MemRegion::ReadWrite(0xc000, wram), // 8k wram
-				hram: MemRegion::ReadWrite(0xff80, hram),
-				cart: MemRegion::Empty,
-				bios: MemRegion::Empty,
-				bios_enabled: true,
-				io: MemRegion::IO(0xff00, IOHandler{})
-			}
-		}
+
+			vram: RAMBlock { base: 0x8000, v: vram}, // 8k vram
+			wram: RAMBlock { base: 0xc000, v: wram}, // 8k wram
+			hram: RAMBlock { base: 0xff80, v: hram},
+			cart: None,
+			bios: None,
+			bios_enabled: true,
+			ppu: PPU{},
+		};
+
+		c
 	}
 }
 

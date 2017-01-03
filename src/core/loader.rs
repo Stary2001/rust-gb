@@ -1,8 +1,8 @@
-use core::mem::MemRegion;
+use core::mem::ROMBlock;
 use std::fs::File;
 use std::io::Read;
 
-pub fn make_region_from_file(name: &str) -> Option<MemRegion>
+pub fn load_from_file(name: &str) -> Option<ROMBlock>
 {
 	match File::open(name)
 	{
@@ -10,8 +10,8 @@ pub fn make_region_from_file(name: &str) -> Option<MemRegion>
 		{
 			let mut v: Vec<u8> = Vec::new();
 			let s: usize = f.read_to_end(&mut v).unwrap();
-			Some(MemRegion::Read(0, v))
+			Some(ROMBlock {base: 0, v: v})
 		},
-		Err(e) => None
+		Err(e) => None,
 	}
 }
