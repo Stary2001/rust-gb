@@ -5,3 +5,4 @@ authors = ["Ezekiel Bethel <mctinfoilball@gmail.com>"]
 
 [dependencies]
 sdl2 = "0.27.2"
+time = "0.1"

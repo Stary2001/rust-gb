@@ -5,7 +5,7 @@ use core::mem::EmptyBlock;
 
 use core::ppu::PPU;
 use core::sound::Sound;
-
+use core::timer::Timer;
 
 struct CPURegs
 {
@@ -34,6 +34,9 @@ pub struct CPU
 	pub interrupts_enabled: bool,
 	pub sound: Sound,
 	pub ppu: PPU,
+	pub timer: Timer,
+	pub pending_interrupts: u8,
+	pub enabled_interrupts: u8,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -537,6 +540,7 @@ impl CPU
 			0x100 ... 0x3fff => &self.cart,
 			0x8000 ... 0x9fff => &self.vram,
 			0xc000 ... 0xdfff => &self.wram,
+			0xff04 ... 0xff07 => &self.timer,
 			0xff10...0xff26 => &self.sound,
 			0xff40...0xff49 => &self.ppu,
 			0xff80...0xfffe => &self.hram,
@@ -552,6 +556,7 @@ impl CPU
 			0x100 ... 0x3fff => &mut self.cart,
 			0x8000 ... 0x9fff => &mut self.vram,
 			0xc000 ... 0xdfff => &mut self.wram,
+			0xff04 ... 0xff07 => &mut self.timer,
 			0xff10...0xff26 => &mut self.sound,
 			0xff40...0xff49 => &mut self.ppu,
 			0xff80...0xfffe => &mut self.hram,
@@ -561,19 +566,22 @@ impl CPU
 
 	pub fn read8(&self, loc: u16) -> u8
 	{
-		let v = self.map(loc).read8(loc);
-		v
+		match loc
+		{
+			0xff0f => self.pending_interrupts,
+			0xffff => self.enabled_interrupts,
+			_ => self.map(loc).read8(loc)
+		}
 	}
 
 	pub fn write8(&mut self, loc: u16, v: u8)
 	{
-		if(loc == 0xff50) // bios disable!
+		match loc
 		{
-			self.bios_enabled = false;
-		}
-		else
-		{
-			self.map_mut(loc).write8(loc, v);
+			0xff50 => self.bios_enabled = false,
+			0xff0f => self.pending_interrupts = v,
+			0xffff => self.enabled_interrupts = v,
+			_ => self.map_mut(loc).write8(loc, v)
 		}
 	}
 
@@ -611,8 +619,11 @@ impl CPU
 			bios: None,
 			bios_enabled: true,
 			interrupts_enabled: false,
+			pending_interrupts: 0,
+			enabled_interrupts: 0,
 			ppu: PPU {lcdc: 0, scanline: 0, scroll_x: 0, scroll_y: 0, palette: 0},
-			sound: Sound{}
+			sound: Sound{},
+			timer: Timer{div_ticks: 0, counter: 0, modulo: 0, ctrl: 0, last_time: 0},
 		};
 
 		c
