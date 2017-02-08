@@ -177,16 +177,16 @@ impl CPU
 		match i
 		{
 			Nop() => (),
-			LoadImm8(r, i) => { self.regs.set8(r, i) },
-			LoadImm16(r, i) => { self.regs.set16(r, i) },
-			LoadReg8(to, from) => { let v = self.regs.get8(from); self.regs.set8(to, v) },
-			LoadReg16(to, from) => { let v = self.regs.get16(from); self.regs.set16(to, v) },
+			LoadImm8(r, i) => { self.set_reg8(r, i) },
+			LoadImm16(r, i) => { self.set_reg16(r, i) },
+			LoadReg8(to, from) => { let v = self.get_reg8(from); self.set_reg8(to, v) },
+			LoadReg16(to, from) => { let v = self.get_reg16(from); self.set_reg16(to, v) },
 			LoadDeref8(from, reg, flag) => {
-											let mut loc = self.regs.get16(reg);
+											let mut loc = self.get_reg16(reg);
 											
 
 											let v = self.read8(loc);
-											self.regs.set8(from, v);
+											self.set_reg8(from, v);
 
 											if flag == InstrFlag::Dec
 											{
@@ -199,13 +199,13 @@ impl CPU
 
 											if flag != InstrFlag::None
 											{
-												self.regs.set16(reg, loc);
+												self.set_reg16(reg, loc);
 											}
 										},
 
 			StoreDeref8(reg, to, flag) => {
-											let v = self.regs.get8(to);
-											let mut loc = self.regs.get16(reg);
+											let v = self.get_reg8(to);
+											let mut loc = self.get_reg16(reg);
 											
 											self.write8(loc, v);
 
@@ -221,18 +221,18 @@ impl CPU
 
 											if flag != InstrFlag::None
 											{
-												self.regs.set16(reg, loc);
+												self.set_reg16(reg, loc);
 											}
 										},
 			LoadDerefImm(imm, reg) => 
 			{
 				let v = self.read8(imm);
-				self.regs.set8(reg, v);
+				self.set_reg8(reg, v);
 			},
 
 			StoreDerefImm(reg, imm) =>
 			{
-				let v = self.regs.get8(reg);
+				let v = self.get_reg8(reg);
 				self.write8(imm, v);
 			},
 
@@ -253,7 +253,7 @@ impl CPU
 
 			JrFlag(off, flag, expected) =>
 			{
-				if self.regs.test_flag(flag) == expected
+				if self.test_flag(flag) == expected
 				{
 					self.exec(Jr(off));
 					jumped = true;
@@ -262,7 +262,7 @@ impl CPU
 
 			Jr(off) =>
 			{
-				let mut pc = self.regs.get16(Reg16::PC);
+				let mut pc = self.get_reg16(Reg16::PC);
 				pc += 2;
 				let off_ = off as i8;
 				if off_ > 0
@@ -273,115 +273,90 @@ impl CPU
 				{
 					pc -= (-off_) as u16;
 				}
-				self.regs.set16(Reg16::PC, pc);
+				self.set_reg16(Reg16::PC, pc);
 
 				jumped = true;
 			},
 
 			Jp(imm) =>
 			{
-				self.regs.set16(Reg16::PC, imm);
+				self.set_reg16(Reg16::PC, imm);
 				jumped = true;
 			}
 
-			Inc8(r) => { let v = self.regs.get8(r); self.regs.set8(r, v.wrapping_add(1)); self.regs.set_flag(CPUFlag::Zero, v == 0xff); },
-			Inc16(r) => { let v = self.regs.get16(r); self.regs.set16(r, v.wrapping_add(1)); self.regs.set_flag(CPUFlag::Zero, v == 0xff); },
-			Dec8(r) => { let v = self.regs.get8(r); self.regs.set8(r, v.wrapping_sub(1)); self.regs.set_flag(CPUFlag::Zero, v == 1); },
-			Dec16(r) => { let v = self.regs.get16(r); self.regs.set16(r, v.wrapping_sub(1)); self.regs.set_flag(CPUFlag::Zero, v == 1); },
+			Inc8(r) => { let v = self.get_reg8(r); self.set_reg8(r, v.wrapping_add(1)); self.set_flag(CPUFlag::Zero, v == 0xff); },
+			Inc16(r) => { let v = self.get_reg16(r); self.set_reg16(r, v.wrapping_add(1)); self.set_flag(CPUFlag::Zero, v == 0xff); },
+			Dec8(r) => { let v = self.get_reg8(r); self.set_reg8(r, v.wrapping_sub(1)); self.set_flag(CPUFlag::Zero, v == 1); },
+			Dec16(r) => { let v = self.get_reg16(r); self.set_reg16(r, v.wrapping_sub(1)); self.set_flag(CPUFlag::Zero, v == 1); },
 
 			CpImm(imm) => {
-				let v = self.regs.get8(Reg8::A);
-				self.regs.set_flag(CPUFlag::Zero, v == imm);	
+				let v = self.get_reg8(Reg8::A);
+				self.set_flag(CPUFlag::Zero, v == imm);	
 			}
-
-			// Add()
-			Add(Reg8::DerefHL) =>
-			{
-				let v = self.regs.get8(Reg8::A);
-				let vv = self.read8(self.regs.get16(Reg16::HL));
-
-				self.regs.set8(Reg8::A, v.wrapping_add(vv));
-				self.regs.set_flag(CPUFlag::Zero, v.wrapping_add(vv) == 0);
-			},
 
 			Add(r) =>
 			{
-				let v = self.regs.get8(Reg8::A);
-				let vv = self.regs.get8(r);
+				let v = self.get_reg8(Reg8::A);
+				let vv = self.get_reg8(r);
 
-				self.regs.set8(Reg8::A, v.wrapping_add(vv));
-				self.regs.set_flag(CPUFlag::Zero, v.wrapping_add(vv) == 0);
+				self.set_reg8(Reg8::A, v.wrapping_add(vv));
+				self.set_flag(CPUFlag::Zero, v.wrapping_add(vv) == 0);
 			},
 
 			// Adc()
-			Sub(Reg8::DerefHL) =>
-			{
-				let v = self.regs.get8(Reg8::A);
-				let vv = self.read8(self.regs.get16(Reg16::HL));
-
-				self.regs.set8(Reg8::A, v.wrapping_sub(vv));
-				self.regs.set_flag(CPUFlag::Zero, v.wrapping_sub(vv) == 0);
-			},
 
 			Sub(r) =>
 			{
-				let v = self.regs.get8(Reg8::A);
-				let vv = self.regs.get8(r);
+				let v = self.get_reg8(Reg8::A);
+				let vv = self.get_reg8(r);
 
-				self.regs.set8(Reg8::A, v.wrapping_sub(vv));
-				self.regs.set_flag(CPUFlag::Zero, v.wrapping_sub(vv) == 0);
+				self.set_reg8(Reg8::A, v.wrapping_sub(vv));
+				self.set_flag(CPUFlag::Zero, v.wrapping_sub(vv) == 0);
 			},
 			// Sbc()
 			// And()
-			Xor(r) => { let v = self.regs.get8(Reg8::A); let vv = self.regs.get8(r); self.regs.set8(Reg8::A, v ^ vv)},
+			Xor(r) => { let v = self.get_reg8(Reg8::A); let vv = self.get_reg8(r); self.set_reg8(Reg8::A, v ^ vv)},
 			// Or()
 
-			Cp(Reg8::DerefHL) =>
-			{
-				let v = self.regs.get8(Reg8::A);
-				let vv = self.read8(self.regs.get16(Reg16::HL));
-				self.regs.set_flag(CPUFlag::Zero, v == vv);
-			},
-
-			Cp(r) => { let v = self.regs.get8(Reg8::A); let vv = self.regs.get8(r); self.regs.set_flag(CPUFlag::Zero, v == vv); },
+			Cp(r) => { let v = self.get_reg8(Reg8::A); let vv = self.get_reg8(r); self.set_flag(CPUFlag::Zero, v == vv); },
 
 			Rl(r) => 
 			{
-				let mut v = self.regs.get8(r);
+				let mut v = self.get_reg8(r);
 				let set_carry = v & 0x80 == 0x80;
 				v = v << 1;
-				if self.regs.test_flag(CPUFlag::Carry)
+				if self.test_flag(CPUFlag::Carry)
 				{
 					v |= 1;
 				}
-				self.regs.set_flag(CPUFlag::Carry, set_carry)
+				self.set_flag(CPUFlag::Carry, set_carry)
 			},
 
 			Bit(n, r) =>
 			{
-				let v = self.regs.get8(r);
+				let v = self.get_reg8(r);
 				let f = v & (1 << n) == (1 << n);
-				self.regs.set_flag(CPUFlag::Zero, !f);
+				self.set_flag(CPUFlag::Zero, !f);
 			},
 
 			HiReadImm(off) =>
 			{
 				let v = self.read8(0xff00 + off as u16);
-				self.regs.set8(Reg8::A, v);
+				self.set_reg8(Reg8::A, v);
 			},
 
 			HiReadReg() => 
 			{
-				let v = self.read8(0xff00 + self.regs.get8(Reg8::C) as u16);
-				self.regs.set8(Reg8::A, v);
+				let v = self.read8(0xff00 + self.get_reg8(Reg8::C) as u16);
+				self.set_reg8(Reg8::A, v);
 			},
 
-			HiWriteImm(off) => { let v  = self.regs.get8(Reg8::A); self.write8(0xff00 + off as u16, v) },
+			HiWriteImm(off) => { let v  = self.get_reg8(Reg8::A); self.write8(0xff00 + off as u16, v) },
 
-			HiWriteReg() => { let v  = self.regs.get8(Reg8::A); let off = self.regs.get8(Reg8::C); self.write8(0xff00 + off as u16, v) },
+			HiWriteReg() => { let v  = self.get_reg8(Reg8::A); let off = self.get_reg8(Reg8::C); self.write8(0xff00 + off as u16, v) },
 
-			Push(reg) => { let v = self.regs.get16(reg); self.push(v); },
-			Pop(reg) => { let v = self.pop(); self.regs.set16(reg, v); },
+			Push(reg) => { let v = self.get_reg16(reg); self.push(v); },
+			Pop(reg) => { let v = self.pop(); self.set_reg16(reg, v); },
 
 			SetInterruptFlag(val) => self.interrupts_enabled = val,
 			Instr::Invalid(aa) => panic!("Invalid instr 0x{:x}", aa),
@@ -628,82 +603,79 @@ impl CPU
 
 		c
 	}
-}
 
-impl CPURegs
-{
-	fn get8(&self, r: Reg8) -> u8
+	fn get_reg8(&self, r: Reg8) -> u8
 	{
 		match r
 		{
-			Reg8::A => self.a,
-			Reg8::B => self.b,
-			Reg8::C => self.c,
-			Reg8::D => self.d,
-			Reg8::E => self.e,
-			Reg8::H => self.h,
-			Reg8::L => self.l,
-			Reg8::F => self.f,
-			Reg8::DerefHL => panic!("Trying to get deref!")
+			Reg8::A => self.regs.a,
+			Reg8::B => self.regs.b,
+			Reg8::C => self.regs.c,
+			Reg8::D => self.regs.d,
+			Reg8::E => self.regs.e,
+			Reg8::H => self.regs.h,
+			Reg8::L => self.regs.l,
+			Reg8::F => self.regs.f,
+			Reg8::DerefHL => self.read8(self.get_reg16(Reg16::HL))
 		}
 	}
 
-	fn get16(&self, r: Reg16) -> u16
+	fn get_reg16(&self, r: Reg16) -> u16
 	{
 		match r
 		{
-			Reg16::AF => self.f as u16 | (self.a as u16) << 8,
-			Reg16::BC => self.c as u16 | (self.b as u16) << 8,
-			Reg16::DE => self.e as u16 | (self.d as u16) << 8,
-			Reg16::HL => self.l as u16 | (self.h as u16) << 8,
-			Reg16::SP => self.sp,
-			Reg16::PC => self.pc
+			Reg16::AF => self.regs.f as u16 | (self.regs.a as u16) << 8,
+			Reg16::BC => self.regs.c as u16 | (self.regs.b as u16) << 8,
+			Reg16::DE => self.regs.e as u16 | (self.regs.d as u16) << 8,
+			Reg16::HL => self.regs.l as u16 | (self.regs.h as u16) << 8,
+			Reg16::SP => self.regs.sp,
+			Reg16::PC => self.regs.pc
 		}
 	}
 
-	fn set8(&mut self, r: Reg8, v: u8)
+	fn set_reg8(&mut self, r: Reg8, v: u8)
 	{
 		match r
 		{
-			Reg8::A => self.a = v,
-			Reg8::B => self.b = v,
-			Reg8::C => self.c = v,
-			Reg8::D => self.d = v,
-			Reg8::E => self.e = v,
-			Reg8::H => self.h = v,
-			Reg8::L => self.l = v,
-			Reg8::F => self.f = v,
+			Reg8::A => self.regs.a = v,
+			Reg8::B => self.regs.b = v,
+			Reg8::C => self.regs.c = v,
+			Reg8::D => self.regs.d = v,
+			Reg8::E => self.regs.e = v,
+			Reg8::H => self.regs.h = v,
+			Reg8::L => self.regs.l = v,
+			Reg8::F => self.regs.f = v,
 			Reg8::DerefHL => panic!("Trying to set deref!")
 		}
 	}
 
-	fn set16(&mut self, r: Reg16, v: u16)
+	fn set_reg16(&mut self, r: Reg16, v: u16)
 	{
 		match r
 		{
-			Reg16::AF => { self.a = ((v>>8) & 0xff) as u8; self.f = (v&0xff) as u8; },
-			Reg16::BC => { self.b = ((v>>8) & 0xff) as u8; self.c = (v&0xff) as u8; },
-			Reg16::DE => { self.d = ((v>>8) & 0xff) as u8; self.e = (v&0xff) as u8; },
-			Reg16::HL => { self.h = ((v>>8) & 0xff) as u8; self.l = (v&0xff) as u8; },
-			Reg16::SP => { self.sp = v },
-			Reg16::PC => { self.pc = v },
+			Reg16::AF => { self.regs.a = ((v>>8) & 0xff) as u8; self.regs.f = (v&0xff) as u8; },
+			Reg16::BC => { self.regs.b = ((v>>8) & 0xff) as u8; self.regs.c = (v&0xff) as u8; },
+			Reg16::DE => { self.regs.d = ((v>>8) & 0xff) as u8; self.regs.e = (v&0xff) as u8; },
+			Reg16::HL => { self.regs.h = ((v>>8) & 0xff) as u8; self.regs.l = (v&0xff) as u8; },
+			Reg16::SP => { self.regs.sp = v },
+			Reg16::PC => { self.regs.pc = v },
 		}
 	}
 
 	pub fn test_flag(&mut self, flag: CPUFlag) -> bool
 	{
-		self.f & (flag as u8) == (flag as u8)
+		self.regs.f & (flag as u8) == (flag as u8)
 	}
 
 	pub fn set_flag(&mut self, flag: CPUFlag, state: bool)
 	{
 		if state == true
 		{
-			self.f |= flag as u8;
+			self.regs.f |= flag as u8;
 		}
 		else
 		{
-			self.f &= !(flag as u8);
+			self.regs.f &= !(flag as u8);
 		}
 	}
 }
