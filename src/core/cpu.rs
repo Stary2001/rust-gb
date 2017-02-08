@@ -6,9 +6,6 @@ use core::mem::EmptyBlock;
 use core::ppu::PPU;
 use core::sound::Sound;
 
-use std::ops::*;
-use std::fmt::Display;
-use std::fmt;
 
 struct CPURegs
 {
@@ -156,6 +153,7 @@ impl Instr
 			CpImm(_) => 2,
 			LoadDerefImm(_, _) |
 			StoreDerefImm(_, _) => 3,
+			HiReadImm(_) | HiWriteImm(_) => 2,
 			_ => 1
 		}
 	}
@@ -169,7 +167,6 @@ impl CPU
 	{
 		let mut jumped: bool = false;
 
-		println!("Instr: {:?} at pc {:x}", i, self.regs.pc);
 		match i
 		{
 			LoadImm8(r, i) => { self.regs.set8(r, i) },
@@ -216,7 +213,7 @@ impl CPU
 
 											if flag != InstrFlag::None
 											{
-												println!("inc/dec {:?} -> {:x}", reg, loc);
+												//println!("inc/dec {:?} -> {:x}", reg, loc);
 												self.regs.set16(reg, loc);
 											}
 										},
@@ -274,10 +271,10 @@ impl CPU
 				jumped = true;
 			}
 
-			Inc8(r) => { let v = self.regs.get8(r); self.regs.set8(r, v+1); self.regs.set_flag(CPUFlag::Zero, v == 0xff); },
-			Inc16(r) => { let v = self.regs.get16(r); self.regs.set16(r, v+1); self.regs.set_flag(CPUFlag::Zero, v == 0xff); },
-			Dec8(r) => { let v = self.regs.get8(r); self.regs.set8(r, v-1); self.regs.set_flag(CPUFlag::Zero, v == 1); },
-			Dec16(r) => { let v = self.regs.get16(r); self.regs.set16(r, v-1); self.regs.set_flag(CPUFlag::Zero, v == 1); },
+			Inc8(r) => { let v = self.regs.get8(r); self.regs.set8(r, v.wrapping_add(1)); self.regs.set_flag(CPUFlag::Zero, v == 0xff); },
+			Inc16(r) => { let v = self.regs.get16(r); self.regs.set16(r, v.wrapping_add(1)); self.regs.set_flag(CPUFlag::Zero, v == 0xff); },
+			Dec8(r) => { let v = self.regs.get8(r); self.regs.set8(r, v.wrapping_sub(1)); self.regs.set_flag(CPUFlag::Zero, v == 1); },
+			Dec16(r) => { let v = self.regs.get16(r); self.regs.set16(r, v.wrapping_sub(1)); self.regs.set_flag(CPUFlag::Zero, v == 1); },
 
 			CpImm(imm) => {
 				let v = self.regs.get8(Reg8::A);
@@ -285,16 +282,33 @@ impl CPU
 			}
 			// Add()
 			// Adc()
-			// Sub()
+			Sub(r) => 
+			{
+				let v = self.regs.get8(Reg8::A);
+				let vv = self.regs.get8(r);
+				println!("Sub {:x}-{:x}", v, vv);
+				self.regs.set8(Reg8::A, v - vv);
+				self.regs.set_flag(CPUFlag::Zero, (v - vv) == 0);
+			},
 			// Sbc()
 			// And()
 			Xor(r) => { let v = self.regs.get8(Reg8::A); let vv = self.regs.get8(r); self.regs.set8(Reg8::A, v ^ vv)},
+			// Or()
+			// Cp()
+			Cp(Reg8::DerefHL) => 
+			{
+				let v = self.regs.get8(Reg8::A);
+				let vv = self.read8(self.regs.get16(Reg16::HL));
+				self.regs.set_flag(CPUFlag::Zero, v == vv);
+			},
+
+			Cp(r) => { let v = self.regs.get8(Reg8::A); let vv = self.regs.get8(r); self.regs.set_flag(CPUFlag::Zero, v == vv); },
 
 			Rl(r) => 
 			{
 				let mut v = self.regs.get8(r);
 				let set_carry = v & 0x80 == 0x80;
-				v = (v << 1);
+				v = v << 1;
 				if self.regs.test_flag(CPUFlag::Carry)
 				{
 					v |= 1;
@@ -305,7 +319,7 @@ impl CPU
 			Bit(n, r) =>
 			{
 				let v = self.regs.get8(r);
-				let f = (v & (1 << n) == (1 << n));
+				let f = v & (1 << n) == (1 << n);
 				println!("{} {} {}", f, v, 1<<n);
 				self.regs.set_flag(CPUFlag::Zero, !f);
 			},
@@ -330,7 +344,7 @@ impl CPU
 			Pop(reg) => { let v = self.pop(); self.regs.set16(reg, v); },
 
 			Instr::Invalid(aa) => panic!("Invalid instr 0x{:x}", aa),
-			_ => panic!("Unimplemented instr!!")
+			_ => panic!("Unimplemented instr!! {:?} at pc {:x}", i, self.regs.pc)
 		}
 
 		if !jumped
@@ -396,7 +410,7 @@ impl CPU
 			// (hl) / a load
 			0x76 => Halt(),
 			0x70...0x75 | 0x77 => StoreDeref8(Reg16::HL, reg_lut[(i&0x0f) as usize], InstrFlag::None),
-			0x78...0x7f => LoadReg8(Reg8::C, reg_lut[(i&0x0f - 8) as usize]),
+			0x78...0x7f => LoadReg8(Reg8::A, reg_lut[(i&0x0f - 8) as usize]),
 
 			// ADDs / ADCs
 			0x80...0x87 => Add(reg_lut[(i&0x0f) as usize]),
@@ -505,13 +519,12 @@ impl CPU
 
 	pub fn read8(&self, loc: u16) -> u8
 	{
-		println!("Read8 at 0x{:x}", loc);
-		return self.map(loc).read8(loc);
+		let v = self.map(loc).read8(loc);
+		v
 	}
 
 	pub fn write8(&mut self, loc: u16, v: u8)
 	{
-		println!("Write to 0x{:x}: 0x{:x}", loc, v);
 		self.map_mut(loc).write8(loc, v);
 	}
 
@@ -519,13 +532,11 @@ impl CPU
 	{
 		let r = self.map(loc);
 		let a: u16 = r.read8(loc) as u16 | (r.read8(loc + 1) as u16) << 8;
-		println!("Read16 at 0x{:x} => 0x{:x}", loc, a);
 		a
 	}
 
 	pub fn write16(&mut self, loc: u16, v: u16)
 	{
-		println!("Write16 at 0x{:x}, 0x{}", loc, v);
 		let r = self.map_mut(loc);
 		r.write8(loc, (v & 0xff) as u8);
 		r.write8(loc + 1, ((v & 0xff00) >> 8) as u8);
@@ -550,7 +561,7 @@ impl CPU
 			cart: None,
 			bios: None,
 			bios_enabled: true,
-			ppu: PPU{},
+			ppu: PPU {lcdc: 0, scanline: 0, scroll_x: 0, scroll_y: 0, palette: 0},
 			sound: Sound{}
 		};
 
@@ -570,7 +581,7 @@ impl CPURegs
 			Reg8::D => self.d,
 			Reg8::E => self.e,
 			Reg8::H => self.h,
-			Reg8::L => self.l,
+			Reg8::L => self.l, 
 			Reg8::F => self.f,
 			Reg8::DerefHL => panic!("Trying to get deref!")
 		}
@@ -591,7 +602,6 @@ impl CPURegs
 
 	fn set8(&mut self, r: Reg8, v: u8)
 	{
-		println!("setting {:?} to 0x{:x}", r, v);
 		match r
 		{
 			Reg8::A => self.a = v,
@@ -608,7 +618,6 @@ impl CPURegs
 
 	fn set16(&mut self, r: Reg16, v: u16)
 	{
-		println!("setting {:?} to 0x{:x}", r, v);
 		match r
 		{
 			Reg16::AF => { self.a = ((v>>8) & 0xff) as u8; self.f = (v&0xff) as u8; },

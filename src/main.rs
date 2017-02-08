@@ -18,14 +18,23 @@ fn main()
 	let mut w = SDLWindow::new();
 	loop
 	{
+		c.ppu.start_frame();
+		for i in 0..10000
+		{
+			if (i % (10000 / 153)) == 0
+			{
+				c.ppu.step();
+			}
+
+			let instr = c.decode();
+			c.exec(instr);
+		}
+
 		w.do_frame();
 		w.process_events();
-		if(w.should_quit())
+		if w.should_quit()
 		{
 			break
 		}
-		
-		let i = c.decode();
-		c.exec(i);
 	}
 }
