@@ -31,6 +31,7 @@ pub struct CPU
 	pub cart: Option<ROMBlock>,
 	pub bios: Option<ROMBlock>, // BIOS will shadow the first part of cart when enabled
 	pub bios_enabled: bool,
+	pub interrupts_enabled: bool,
 	pub sound: Sound,
 	pub ppu: PPU,
 }
@@ -117,11 +118,13 @@ pub enum Instr
 	Ret(),
 	Jr(u8),
 	JrFlag(u8, CPUFlag, bool),
+	Jp(u16),
 
 	Push(Reg16),
 	Pop(Reg16),
 
 	Halt(),
+	SetInterruptFlag(bool),
 	HiReadReg(),
 	HiReadImm(u8),
 	HiWriteImm(u8),
@@ -139,6 +142,7 @@ impl Instr
 			Instr::LoadImm8(_, _) => 2,
 			Instr::LoadImm16(_, _) => 3,
 			JrFlag(_, _, _) | Jr(_) => 2,
+			Jp(_) => 3,
 			Rlc(_) |
 			Rrc(_) |
 			Rl(_) |
@@ -169,6 +173,7 @@ impl CPU
 
 		match i
 		{
+			Nop() => (),
 			LoadImm8(r, i) => { self.regs.set8(r, i) },
 			LoadImm16(r, i) => { self.regs.set16(r, i) },
 			LoadReg8(to, from) => { let v = self.regs.get8(from); self.regs.set8(to, v) },
@@ -213,7 +218,6 @@ impl CPU
 
 											if flag != InstrFlag::None
 											{
-												//println!("inc/dec {:?} -> {:x}", reg, loc);
 												self.regs.set16(reg, loc);
 											}
 										},
@@ -269,6 +273,12 @@ impl CPU
 				self.regs.set16(Reg16::PC, pc);
 
 				jumped = true;
+			},
+
+			Jp(imm) =>
+			{
+				self.regs.set16(Reg16::PC, imm);
+				jumped = true;
 			}
 
 			Inc8(r) => { let v = self.regs.get8(r); self.regs.set8(r, v.wrapping_add(1)); self.regs.set_flag(CPUFlag::Zero, v == 0xff); },
@@ -280,22 +290,50 @@ impl CPU
 				let v = self.regs.get8(Reg8::A);
 				self.regs.set_flag(CPUFlag::Zero, v == imm);	
 			}
+
 			// Add()
-			// Adc()
-			Sub(r) => 
+			Add(Reg8::DerefHL) =>
+			{
+				let v = self.regs.get8(Reg8::A);
+				let vv = self.read8(self.regs.get16(Reg16::HL));
+
+				self.regs.set8(Reg8::A, v.wrapping_add(vv));
+				self.regs.set_flag(CPUFlag::Zero, v.wrapping_add(vv) == 0);
+			},
+
+			Add(r) =>
 			{
 				let v = self.regs.get8(Reg8::A);
 				let vv = self.regs.get8(r);
-				println!("Sub {:x}-{:x}", v, vv);
-				self.regs.set8(Reg8::A, v - vv);
-				self.regs.set_flag(CPUFlag::Zero, (v - vv) == 0);
+
+				self.regs.set8(Reg8::A, v.wrapping_add(vv));
+				self.regs.set_flag(CPUFlag::Zero, v.wrapping_add(vv) == 0);
+			},
+
+			// Adc()
+			Sub(Reg8::DerefHL) =>
+			{
+				let v = self.regs.get8(Reg8::A);
+				let vv = self.read8(self.regs.get16(Reg16::HL));
+
+				self.regs.set8(Reg8::A, v.wrapping_sub(vv));
+				self.regs.set_flag(CPUFlag::Zero, v.wrapping_sub(vv) == 0);
+			},
+
+			Sub(r) =>
+			{
+				let v = self.regs.get8(Reg8::A);
+				let vv = self.regs.get8(r);
+
+				self.regs.set8(Reg8::A, v.wrapping_sub(vv));
+				self.regs.set_flag(CPUFlag::Zero, v.wrapping_sub(vv) == 0);
 			},
 			// Sbc()
 			// And()
 			Xor(r) => { let v = self.regs.get8(Reg8::A); let vv = self.regs.get8(r); self.regs.set8(Reg8::A, v ^ vv)},
 			// Or()
-			// Cp()
-			Cp(Reg8::DerefHL) => 
+
+			Cp(Reg8::DerefHL) =>
 			{
 				let v = self.regs.get8(Reg8::A);
 				let vv = self.read8(self.regs.get16(Reg16::HL));
@@ -320,7 +358,6 @@ impl CPU
 			{
 				let v = self.regs.get8(r);
 				let f = v & (1 << n) == (1 << n);
-				println!("{} {} {}", f, v, 1<<n);
 				self.regs.set_flag(CPUFlag::Zero, !f);
 			},
 
@@ -343,6 +380,7 @@ impl CPU
 			Push(reg) => { let v = self.regs.get16(reg); self.push(v); },
 			Pop(reg) => { let v = self.pop(); self.regs.set16(reg, v); },
 
+			SetInterruptFlag(val) => self.interrupts_enabled = val,
 			Instr::Invalid(aa) => panic!("Invalid instr 0x{:x}", aa),
 			_ => panic!("Unimplemented instr!! {:?} at pc {:x}", i, self.regs.pc)
 		}
@@ -387,6 +425,7 @@ impl CPU
 
 			0x28 => JrFlag(self.read8(self.regs.pc + 1), CPUFlag::Zero, true),
 
+			0xc3 => Jp(self.read16(self.regs.pc + 1)),
 			// \/ gameboy specific ldi (HL), A / ldi A, (HL)
 			0x22 => StoreDeref8(Reg16::HL, Reg8::A, InstrFlag::Inc),
 			0x2a => LoadDeref8(Reg8::A, Reg16::HL, InstrFlag::Inc),
@@ -434,7 +473,6 @@ impl CPU
 			0xc5 | 0xd5 | 0xe5 => Push(reg16_lut[(((i&0xf0) >> 4)- 0xc) as usize]),
 			0xf5 => Push(Reg16::AF),
 
-
 			0xcb => 
 			{
 				let i = self.read8(self.regs.pc + 1);
@@ -468,7 +506,9 @@ impl CPU
 			0xe2 => HiWriteReg(),
 			0xea => StoreDerefImm(Reg8::A, self.read16(self.regs.pc + 1)),
 			0xf0 => HiReadImm(self.read8(self.regs.pc + 1)),
+			0xf3 => SetInterruptFlag(false),
 			0xfa => LoadDerefImm(self.read16(self.regs.pc + 1), Reg8::A),
+			0xfb => SetInterruptFlag(true),
 			0xfe => CpImm(self.read8(self.regs.pc + 1)),
 
 			_ => Instr::Invalid(i as u16),
@@ -496,6 +536,7 @@ impl CPU
 			0...0xff => { if self.bios_enabled { &self.bios } else { &self.cart } }
 			0x100 ... 0x3fff => &self.cart,
 			0x8000 ... 0x9fff => &self.vram,
+			0xc000 ... 0xdfff => &self.wram,
 			0xff10...0xff26 => &self.sound,
 			0xff40...0xff49 => &self.ppu,
 			0xff80...0xfffe => &self.hram,
@@ -510,6 +551,7 @@ impl CPU
 			0...0xff => { if self.bios_enabled { &mut self.bios } else { &mut self.cart } }
 			0x100 ... 0x3fff => &mut self.cart,
 			0x8000 ... 0x9fff => &mut self.vram,
+			0xc000 ... 0xdfff => &mut self.wram,
 			0xff10...0xff26 => &mut self.sound,
 			0xff40...0xff49 => &mut self.ppu,
 			0xff80...0xfffe => &mut self.hram,
@@ -525,7 +567,14 @@ impl CPU
 
 	pub fn write8(&mut self, loc: u16, v: u8)
 	{
-		self.map_mut(loc).write8(loc, v);
+		if(loc == 0xff50) // bios disable!
+		{
+			self.bios_enabled = false;
+		}
+		else
+		{
+			self.map_mut(loc).write8(loc, v);
+		}
 	}
 
 	pub fn read16(&self, loc: u16) -> u16
@@ -561,6 +610,7 @@ impl CPU
 			cart: None,
 			bios: None,
 			bios_enabled: true,
+			interrupts_enabled: false,
 			ppu: PPU {lcdc: 0, scanline: 0, scroll_x: 0, scroll_y: 0, palette: 0},
 			sound: Sound{}
 		};
@@ -581,7 +631,7 @@ impl CPURegs
 			Reg8::D => self.d,
 			Reg8::E => self.e,
 			Reg8::H => self.h,
-			Reg8::L => self.l, 
+			Reg8::L => self.l,
 			Reg8::F => self.f,
 			Reg8::DerefHL => panic!("Trying to get deref!")
 		}
