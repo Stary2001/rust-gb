@@ -98,12 +98,17 @@ pub enum Instr
 	Dec16(Reg16),
 
 	Add(Reg8),
+	AddImm(u8),
 	AddCarry(Reg8),
 	Sub(Reg8),
+	SubImm(u8),
 	SubCarry(Reg8),
 	And(Reg8),
+	AndImm(u8),
 	Xor(Reg8),
+	XorImm(u8),
 	Or(Reg8),
+	OrImm(u8),
 	Cp(Reg8),
 	CpImm(u8),
 
@@ -118,10 +123,12 @@ pub enum Instr
 	Bit(u8, Reg8),
 
 	Call(u16),
+	CallFlag(u16, CPUFlag, bool),
 	Ret(),
 	Jr(u8),
 	JrFlag(u8, CPUFlag, bool),
 	Jp(u16),
+	JpReg(Reg16),
 
 	Push(Reg16),
 	Pop(Reg16),
@@ -141,6 +148,7 @@ impl Instr
 	{
 		match i
 		{
+			Rr(Reg8::A) => 1,
 			Rl(Reg8::A) => 1,
 			Instr::LoadImm8(_, _) => 2,
 			Instr::LoadImm16(_, _) => 3,
@@ -156,8 +164,8 @@ impl Instr
 			Srl(_) |
 			Bit(_, _) => 2,
 
-			Call(_) => 3,
-			CpImm(_) => 2,
+			Call(_) | CallFlag(_, _, _) => 3,
+			AddImm(_) | SubImm(_) | AndImm(_) | OrImm(_) | XorImm(_) | CpImm(_) => 2,
 			LoadDerefImm(_, _) |
 			StoreDerefImm(_, _) => 3,
 			HiReadImm(_) | HiWriteImm(_) => 2,
@@ -236,11 +244,21 @@ impl CPU
 				self.write8(imm, v);
 			},
 
+			CallFlag(off, flag, expected) =>
+			{
+				if self.test_flag(flag) == expected
+				{
+					self.exec(Call(off));
+					jumped = true;
+				}
+			},
+
 			Call(off) =>
 			{
 				let pc = self.regs.pc;
 				self.push(pc + 3);
 				self.regs.pc = off;
+
 				jumped = true;
 			},
 
@@ -282,7 +300,14 @@ impl CPU
 			{
 				self.set_reg16(Reg16::PC, imm);
 				jumped = true;
-			}
+			},
+
+			JpReg(r) =>
+			{
+				let loc = self.get_reg16(r);
+				self.set_reg16(Reg16::PC, loc);
+				jumped = true;
+			},
 
 			Inc8(r) => { let v = self.get_reg8(r); self.set_reg8(r, v.wrapping_add(1)); self.set_flag(CPUFlag::Zero, v == 0xff); },
 			Inc16(r) => { let v = self.get_reg16(r); self.set_reg16(r, v.wrapping_add(1)); self.set_flag(CPUFlag::Zero, v == 0xff); },
@@ -294,6 +319,13 @@ impl CPU
 				self.set_flag(CPUFlag::Zero, v == imm);	
 			}
 
+			AddImm(imm) =>
+			{
+				let v = self.get_reg8(Reg8::A);
+				self.set_reg8(Reg8::A, v.wrapping_add(imm));
+				self.set_flag(CPUFlag::Zero, v.wrapping_add(imm) == 0);
+			},
+
 			Add(r) =>
 			{
 				let v = self.get_reg8(Reg8::A);
@@ -304,6 +336,13 @@ impl CPU
 			},
 
 			// Adc()
+			SubImm(imm) =>
+			{
+				let v = self.get_reg8(Reg8::A);
+
+				self.set_reg8(Reg8::A, v.wrapping_sub(imm));
+				self.set_flag(CPUFlag::Zero, v.wrapping_sub(imm) == 0);
+			},
 
 			Sub(r) =>
 			{
@@ -313,12 +352,17 @@ impl CPU
 				self.set_reg8(Reg8::A, v.wrapping_sub(vv));
 				self.set_flag(CPUFlag::Zero, v.wrapping_sub(vv) == 0);
 			},
+
 			// Sbc()
-			// And()
-			Xor(r) => { let v = self.get_reg8(Reg8::A); let vv = self.get_reg8(r); self.set_reg8(Reg8::A, v ^ vv)},
-			// Or()
+			And(r) => { let v = self.get_reg8(Reg8::A); let vv = self.get_reg8(r); self.set_reg8(Reg8::A, v & vv); self.update_flags(Reg8::A) },
+			AndImm(imm) => { let v = self.get_reg8(Reg8::A); self.set_reg8(Reg8::A, v & imm); self.update_flags(Reg8::A)},
+			Xor(r) => { let v = self.get_reg8(Reg8::A); let vv = self.get_reg8(r); self.set_reg8(Reg8::A, v ^ vv); self.update_flags(Reg8::A) },
+			XorImm(imm) => { let v = self.get_reg8(Reg8::A); self.set_reg8(Reg8::A, v ^ imm); self.update_flags(Reg8::A)},
+			Or(r) => { let v = self.get_reg8(Reg8::A); let vv = self.get_reg8(r); self.set_reg8(Reg8::A, v | vv); self.update_flags(Reg8::A) },
 
 			Cp(r) => { let v = self.get_reg8(Reg8::A); let vv = self.get_reg8(r); self.set_flag(CPUFlag::Zero, v == vv); },
+
+			// Rlc()
 
 			Rl(r) => 
 			{
@@ -329,7 +373,33 @@ impl CPU
 				{
 					v |= 1;
 				}
-				self.set_flag(CPUFlag::Carry, set_carry)
+				self.set_reg8(r, v);
+				self.set_flag(CPUFlag::Carry, set_carry);
+				self.update_flags(r)
+			},
+
+			Rr(r) =>
+			{
+				let mut v = self.get_reg8(r);
+				let set_carry = v & 1 == 1;
+				v = v >> 1;
+				if self.test_flag(CPUFlag::Carry)
+				{
+					v |= 0x80;
+				}
+				self.set_reg8(r, v);
+				self.set_flag(CPUFlag::Carry, set_carry);
+				self.update_flags(r)
+			}
+
+			Srl(r) =>
+			{
+				let mut v = self.get_reg8(r);
+				let set_carry = v & 1 == 1;
+				v = v >> 1;
+				self.set_reg8(r, v);
+				self.set_flag(CPUFlag::Carry, set_carry);
+				self.update_flags(r)
 			},
 
 			Bit(n, r) =>
@@ -359,7 +429,7 @@ impl CPU
 			Pop(reg) => { let v = self.pop(); self.set_reg16(reg, v); },
 
 			SetInterruptFlag(val) => self.interrupts_enabled = val,
-			Instr::Invalid(aa) => panic!("Invalid instr 0x{:x}", aa),
+			Instr::Invalid(aa) => panic!("Invalid instr 0x{:x} at pc {:x}", aa, self.regs.pc),
 			_ => panic!("Unimplemented instr!! {:?} at pc {:x}", i, self.regs.pc)
 		}
 
@@ -396,8 +466,12 @@ impl CPU
 
 			0x0e | 0x1e | 0x2e | 0x3e => LoadImm8(reg_lut[(((i & 0xf0) >> 4) * 2 + 1) as usize], self.read8(self.regs.pc + 1)),
 
+			0x12 => StoreDeref8(Reg16::DE, Reg8::A, InstrFlag::None),
+
 			0x17 => Rl(Reg8::A),
 			0x18 => Jr(self.read8(self.regs.pc + 1)),
+			0x1f => Rr(Reg8::A),
+
 			0x20 => JrFlag(self.read8(self.regs.pc + 1), CPUFlag::Zero, false),
 			0x30 => JrFlag(self.read8(self.regs.pc + 1), CPUFlag::Carry, false),
 
@@ -451,22 +525,31 @@ impl CPU
 			0xc5 | 0xd5 | 0xe5 => Push(reg16_lut[(((i&0xf0) >> 4)- 0xc) as usize]),
 			0xf5 => Push(Reg16::AF),
 
+			0xc4 => CallFlag(self.read16(self.regs.pc + 1), CPUFlag::Zero, false),
+			0xd4 => CallFlag(self.read16(self.regs.pc + 1), CPUFlag::Carry, false),
+
+			0xc6 => AddImm(self.read8(self.regs.pc + 1)),
+			0xd6 => SubImm(self.read8(self.regs.pc + 1)),
+			0xe6 => AndImm(self.read8(self.regs.pc + 1)),
+			0xf6 => OrImm(self.read8(self.regs.pc + 1)),
+
+			0xc9 => Ret(),
 			0xcb => 
 			{
 				let i = self.read8(self.regs.pc + 1);
 				match i
 				{
 					0x00...0x07 => Rlc(reg_lut[(i&0x0f) as usize]),
-					0x08...0x0f => Rrc(reg_lut[(i&0x0f) as usize]),
+					0x08...0x0f => Rrc(reg_lut[(i&0x0f) as usize - 8]),
 
 					0x10...0x17 => Rl(reg_lut[(i&0x0f) as usize]),
-					0x18...0x1f => Rr(reg_lut[(i&0x0f) as usize]),
+					0x18...0x1f => Rr(reg_lut[(i&0x0f) as usize - 8]),
 
 					0x20...0x27 => Sla(reg_lut[(i&0x0f) as usize]),
-					0x28...0x2f => Sra(reg_lut[(i&0x0f) as usize]),
+					0x28...0x2f => Sra(reg_lut[(i&0x0f) as usize - 8]),
 
 					0x30...0x37 => Swap(reg_lut[(i&0x0f) as usize]),
-					0x38...0x3f => Srl(reg_lut[(i&0x0f) as usize]),
+					0x38...0x3f => Srl(reg_lut[(i&0x0f) as usize - 8]),
 
 					0x40...0x7f =>  {
 										let mut n = (((i & 0xf0) >> 4) - 4) * 2;
@@ -477,12 +560,14 @@ impl CPU
 				}
 			},
 
-			0xc9 => Ret(),
+			
 			0xcd => Call(self.read16(self.regs.pc + 1)),
 
 			0xe0 => HiWriteImm(self.read8(self.regs.pc + 1)),
 			0xe2 => HiWriteReg(),
+			0xe9 => JpReg(Reg16::HL),
 			0xea => StoreDerefImm(Reg8::A, self.read16(self.regs.pc + 1)),
+			0xee => XorImm(self.read8(self.regs.pc + 1)),
 			0xf0 => HiReadImm(self.read8(self.regs.pc + 1)),
 			0xf3 => SetInterruptFlag(false),
 			0xfa => LoadDerefImm(self.read16(self.regs.pc + 1), Reg8::A),
@@ -513,6 +598,7 @@ impl CPU
 		{
 			0...0xff => { if self.bios_enabled { &self.bios } else { &self.cart } }
 			0x100 ... 0x3fff => &self.cart,
+			0x4000 ... 0x7fff => &self.cart,
 			0x8000 ... 0x9fff => &self.vram,
 			0xc000 ... 0xdfff => &self.wram,
 			0xff04 ... 0xff07 => &self.timer,
@@ -529,6 +615,7 @@ impl CPU
 		{
 			0...0xff => { if self.bios_enabled { &mut self.bios } else { &mut self.cart } }
 			0x100 ... 0x3fff => &mut self.cart,
+			0x4000 ... 0x7fff => &mut self.cart,
 			0x8000 ... 0x9fff => &mut self.vram,
 			0xc000 ... 0xdfff => &mut self.wram,
 			0xff04 ... 0xff07 => &mut self.timer,
@@ -645,7 +732,7 @@ impl CPU
 			Reg8::H => self.regs.h = v,
 			Reg8::L => self.regs.l = v,
 			Reg8::F => self.regs.f = v,
-			Reg8::DerefHL => panic!("Trying to set deref!")
+			Reg8::DerefHL => {let loc = self.get_reg16(Reg16::HL); self.write8(loc, v); }
 		}
 	}
 
@@ -660,6 +747,12 @@ impl CPU
 			Reg16::SP => { self.regs.sp = v },
 			Reg16::PC => { self.regs.pc = v },
 		}
+	}
+
+	fn update_flags(&mut self, r: Reg8)
+	{
+		let v = self.get_reg8(r);
+		self.set_flag(CPUFlag::Zero, v==0);
 	}
 
 	pub fn test_flag(&mut self, flag: CPUFlag) -> bool

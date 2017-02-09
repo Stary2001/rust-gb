@@ -45,7 +45,7 @@ impl MemBlock for Timer
 
 	fn write8(&mut self, loc: u16, v: u8)
 	{
-		println!("PPU write at 0x{:x}!", loc);
+		println!("Timer write at 0x{:x}!", loc);
 		match loc - 0xff04
 		{
 			0 => self.div_ticks = 0,
