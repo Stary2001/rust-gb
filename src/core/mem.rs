@@ -60,5 +60,19 @@ impl MemBlock for Option<ROMBlock>
 	}
 }
 
+
+impl MemBlock for Option<RAMBlock>
+{
+	fn read8(&self, loc: u16) -> u8
+	{
+		match *self
+		{
+			Some(ref v) => v.v[loc as usize - v.base],
+			None => panic!("No RAM!")
+		}
+		
+	}
+}
+
 impl MemBlock for EmptyBlock
 {}

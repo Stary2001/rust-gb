@@ -6,6 +6,7 @@ use core::mem::EmptyBlock;
 use core::ppu::PPU;
 use core::sound::Sound;
 use core::timer::Timer;
+use core::serial::Serial;
 
 struct CPURegs
 {
@@ -29,12 +30,14 @@ pub struct CPU
 	pub wram: RAMBlock,
 	pub hram: RAMBlock,
 	pub cart: Option<ROMBlock>,
+	pub cart_ram: Option<RAMBlock>,
 	pub bios: Option<ROMBlock>, // BIOS will shadow the first part of cart when enabled
 	pub bios_enabled: bool,
 	pub interrupts_enabled: bool,
 	pub sound: Sound,
 	pub ppu: PPU,
 	pub timer: Timer,
+	pub link_port: Serial,
 	pub pending_interrupts: u8,
 	pub enabled_interrupts: u8,
 }
@@ -89,6 +92,7 @@ pub enum Instr
 	LoadReg16(Reg16, Reg16),
 	LoadDeref8(Reg8, Reg16, InstrFlag),
 	StoreDeref8(Reg16, Reg8, InstrFlag),
+	StoreDerefSp(Reg16, u16),
 	LoadDerefImm(u16, Reg8),
 	StoreDerefImm(Reg8, u16),
 
@@ -100,9 +104,12 @@ pub enum Instr
 	Add(Reg8),
 	AddImm(u8),
 	AddCarry(Reg8),
+	AddCarryImm(u8),
+	Add16(Reg16, Reg16),
 	Sub(Reg8),
 	SubImm(u8),
 	SubCarry(Reg8),
+	SubCarryImm(u8),
 	And(Reg8),
 	AndImm(u8),
 	Xor(Reg8),
@@ -111,23 +118,33 @@ pub enum Instr
 	OrImm(u8),
 	Cp(Reg8),
 	CpImm(u8),
+	Not(Reg8),
+	NotCarry(),
+	SetCarry(),
 
 	Rlc(Reg8),
+	RlcA(),
 	Rrc(Reg8),
+	RrcA(),
 	Rl(Reg8),
+	RlA(),
 	Rr(Reg8),
+	RrA(),
 	Sla(Reg8),
 	Sra(Reg8),
 	Swap(Reg8),
 	Srl(Reg8),
 	Bit(u8, Reg8),
+	Res(u8, Reg8),
 
 	Call(u16),
 	CallFlag(u16, CPUFlag, bool),
 	Ret(),
+	RetFlag(CPUFlag, bool),
 	Jr(u8),
 	JrFlag(u8, CPUFlag, bool),
 	Jp(u16),
+	JpFlag(u16, CPUFlag, bool),
 	JpReg(Reg16),
 
 	Push(Reg16),
@@ -139,6 +156,9 @@ pub enum Instr
 	HiReadImm(u8),
 	HiWriteImm(u8),
 	HiWriteReg(),
+
+	Daa(),
+
 	Invalid(u16)
 }
 
@@ -148,12 +168,10 @@ impl Instr
 	{
 		match i
 		{
-			Rr(Reg8::A) => 1,
-			Rl(Reg8::A) => 1,
 			Instr::LoadImm8(_, _) => 2,
 			Instr::LoadImm16(_, _) => 3,
 			JrFlag(_, _, _) | Jr(_) => 2,
-			Jp(_) => 3,
+			Jp(_) | JpFlag(_, _, _) => 3,
 			Rlc(_) |
 			Rrc(_) |
 			Rl(_) |
@@ -164,8 +182,9 @@ impl Instr
 			Srl(_) |
 			Bit(_, _) => 2,
 
+			StoreDerefSp(_, _) => 3,
 			Call(_) | CallFlag(_, _, _) => 3,
-			AddImm(_) | SubImm(_) | AndImm(_) | OrImm(_) | XorImm(_) | CpImm(_) => 2,
+			AddImm(_) | AddCarryImm(_) | SubImm(_) | AndImm(_) | OrImm(_) | XorImm(_) | CpImm(_) => 2,
 			LoadDerefImm(_, _) |
 			StoreDerefImm(_, _) => 3,
 			HiReadImm(_) | HiWriteImm(_) => 2,
@@ -232,6 +251,13 @@ impl CPU
 												self.set_reg16(reg, loc);
 											}
 										},
+
+			StoreDerefSp(reg, imm) => 
+			{
+				let sp = self.get_reg16(reg);
+				self.write16(imm, sp);
+			},
+
 			LoadDerefImm(imm, reg) => 
 			{
 				let v = self.read8(imm);
@@ -262,12 +288,21 @@ impl CPU
 				jumped = true;
 			},
 
+			RetFlag(flag, expected) =>
+			{
+				if self.test_flag(flag) == expected
+				{
+					self.exec(Ret());
+					jumped = true;
+				}
+			},
+
 			Ret() =>
 			{
 				let pc = self.pop();
 				self.regs.pc = pc;
 				jumped = true;
-			}
+			},
 
 			JrFlag(off, flag, expected) =>
 			{
@@ -296,6 +331,15 @@ impl CPU
 				jumped = true;
 			},
 
+			JpFlag(off, flag, expected) =>
+			{
+				if self.test_flag(flag) == expected
+				{
+					self.exec(Jp(off));
+					jumped = true;
+				}
+			},
+
 			Jp(imm) =>
 			{
 				self.set_reg16(Reg16::PC, imm);
@@ -322,47 +366,152 @@ impl CPU
 			AddImm(imm) =>
 			{
 				let v = self.get_reg8(Reg8::A);
-				self.set_reg8(Reg8::A, v.wrapping_add(imm));
-				self.set_flag(CPUFlag::Zero, v.wrapping_add(imm) == 0);
+				let res = v.wrapping_add(imm);
+				self.set_reg8(Reg8::A, res);
+				self.set_flag(CPUFlag::Carry, res < v);
+				self.update_flags8(Reg8::A)
 			},
 
 			Add(r) =>
 			{
 				let v = self.get_reg8(Reg8::A);
 				let vv = self.get_reg8(r);
+				let res = v.wrapping_add(vv);
 
-				self.set_reg8(Reg8::A, v.wrapping_add(vv));
-				self.set_flag(CPUFlag::Zero, v.wrapping_add(vv) == 0);
+				self.set_reg8(Reg8::A, res);
+				self.set_flag(CPUFlag::Carry, res < v);
+				self.update_flags8(Reg8::A)
 			},
 
-			// Adc()
+			AddCarry(r) =>
+			{
+				let v = self.get_reg8(Reg8::A);
+				let vv = self.get_reg8(r);
+				let mut c = 0;
+				if self.test_flag(CPUFlag::Carry)
+				{
+					c = 1;
+				}
+				let res = v.wrapping_add(vv).wrapping_add(c);
+				self.set_flag(CPUFlag::Carry, res < v);
+				self.set_reg8(Reg8::A, res);
+				self.update_flags8(Reg8::A)
+			},
+
+			AddCarryImm(imm) =>
+			{
+				let v = self.get_reg8(Reg8::A);
+				let mut c = 0;
+				if self.test_flag(CPUFlag::Carry)
+				{
+					c = 1;
+				}
+				let res = v.wrapping_add(imm).wrapping_add(c);
+				self.set_flag(CPUFlag::Carry, res < v);
+				self.set_reg8(Reg8::A, res);
+				self.update_flags8(Reg8::A)
+			},
+
+			Add16(dst, src) =>
+			{
+				let v = self.get_reg16(dst);
+				let vv = self.get_reg16(src);
+				let res = v.wrapping_add(vv);
+
+				self.set_flag(CPUFlag::Carry, res < v);
+				self.set_reg16(dst, res);
+				self.update_flags16(dst)
+			}
+
 			SubImm(imm) =>
 			{
 				let v = self.get_reg8(Reg8::A);
+				let res = v.wrapping_sub(imm);
 
-				self.set_reg8(Reg8::A, v.wrapping_sub(imm));
-				self.set_flag(CPUFlag::Zero, v.wrapping_sub(imm) == 0);
+				self.set_flag(CPUFlag::Carry, res < v);
+
+				self.set_reg8(Reg8::A, res);
+				self.update_flags8(Reg8::A)
 			},
 
 			Sub(r) =>
 			{
 				let v = self.get_reg8(Reg8::A);
 				let vv = self.get_reg8(r);
+				let res = v.wrapping_sub(vv);
 
-				self.set_reg8(Reg8::A, v.wrapping_sub(vv));
-				self.set_flag(CPUFlag::Zero, v.wrapping_sub(vv) == 0);
+				self.set_flag(CPUFlag::Carry, res > v);
+				self.set_reg8(Reg8::A, res);
+				self.update_flags8(Reg8::A)
 			},
 
-			// Sbc()
-			And(r) => { let v = self.get_reg8(Reg8::A); let vv = self.get_reg8(r); self.set_reg8(Reg8::A, v & vv); self.update_flags(Reg8::A) },
-			AndImm(imm) => { let v = self.get_reg8(Reg8::A); self.set_reg8(Reg8::A, v & imm); self.update_flags(Reg8::A)},
-			Xor(r) => { let v = self.get_reg8(Reg8::A); let vv = self.get_reg8(r); self.set_reg8(Reg8::A, v ^ vv); self.update_flags(Reg8::A) },
-			XorImm(imm) => { let v = self.get_reg8(Reg8::A); self.set_reg8(Reg8::A, v ^ imm); self.update_flags(Reg8::A)},
-			Or(r) => { let v = self.get_reg8(Reg8::A); let vv = self.get_reg8(r); self.set_reg8(Reg8::A, v | vv); self.update_flags(Reg8::A) },
+			SubCarry(r) =>
+			{
+				let v = self.get_reg8(Reg8::A);
+				let vv = self.get_reg8(r);
+				let mut c = 0;
+				if self.test_flag(CPUFlag::Carry)
+				{
+					c = 1;
+				}
+				let res = v.wrapping_sub(vv).wrapping_sub(c);
+				self.set_flag(CPUFlag::Carry, res > v);
+				self.set_reg8(Reg8::A, res);
+				self.update_flags8(Reg8::A)
+			},
 
+			SubCarryImm(imm) =>
+			{
+				let v = self.get_reg8(Reg8::A);
+				let mut c = 0;
+				if self.test_flag(CPUFlag::Carry)
+				{
+					c = 1;
+				}
+				let res = v.wrapping_sub(imm).wrapping_sub(c);
+				self.set_flag(CPUFlag::Carry, res > v);
+				self.set_reg8(Reg8::A, res);
+				self.update_flags8(Reg8::A)
+			},
+
+			And(r) => { let v = self.get_reg8(Reg8::A); let vv = self.get_reg8(r); self.set_reg8(Reg8::A, v & vv); self.update_flags8(Reg8::A) },
+			AndImm(imm) => { let v = self.get_reg8(Reg8::A); self.set_reg8(Reg8::A, v & imm); self.update_flags8(Reg8::A)},
+			Xor(r) => { let v = self.get_reg8(Reg8::A); let vv = self.get_reg8(r); self.set_reg8(Reg8::A, v ^ vv); self.update_flags8(Reg8::A) },
+			XorImm(imm) => { let v = self.get_reg8(Reg8::A); self.set_reg8(Reg8::A, v ^ imm); self.update_flags8(Reg8::A)},
+			Or(r) => { let v = self.get_reg8(Reg8::A); let vv = self.get_reg8(r); self.set_reg8(Reg8::A, v | vv); self.update_flags8(Reg8::A) },
+			OrImm(imm) => { let v = self.get_reg8(Reg8::A); self.set_reg8(Reg8::A, v | imm); self.update_flags8(Reg8::A) },
 			Cp(r) => { let v = self.get_reg8(Reg8::A); let vv = self.get_reg8(r); self.set_flag(CPUFlag::Zero, v == vv); },
 
-			// Rlc()
+			Not(r) =>
+			{
+				let v = self.get_reg8(r);
+				self.set_reg8(r, !v); 
+			},
+
+			NotCarry() =>
+			{
+				let v = self.test_flag(CPUFlag::Carry);
+				self.set_flag(CPUFlag::Carry, !v);
+			},
+
+			SetCarry() => { self.set_flag(CPUFlag::Carry, true); },
+
+			RlcA() => { self.exec(Rlc(Reg8::A)); self.regs.pc -= 2 },
+			RlA() => { self.exec(Rl(Reg8::A)); self.regs.pc -= 2 },
+
+			Rlc(r) =>
+			{
+				let mut v = self.get_reg8(r);
+				let set_carry = v & 0x80 == 0x80;
+				v = v << 1;
+				if set_carry
+				{
+					v |= 1;
+				}
+				self.set_reg8(r, v);
+				self.set_flag(CPUFlag::Carry, set_carry);
+				self.update_flags8(r)
+			},
 
 			Rl(r) => 
 			{
@@ -375,8 +524,21 @@ impl CPU
 				}
 				self.set_reg8(r, v);
 				self.set_flag(CPUFlag::Carry, set_carry);
-				self.update_flags(r)
+				self.update_flags8(r)
 			},
+
+			Sla(r) =>
+			{
+				let mut v = self.get_reg8(r);
+				let set_carry = v & 1 == 1;
+				v = v << 1;
+				self.set_reg8(r, v);
+				self.set_flag(CPUFlag::Carry, set_carry);
+				self.update_flags8(r)
+			},
+
+			RrcA() => { self.exec(Rrc(Reg8::A)); self.regs.pc -= 2 },
+			RrA() => { self.exec(Rr(Reg8::A)); self.regs.pc -= 2 },
 
 			Rr(r) =>
 			{
@@ -389,8 +551,32 @@ impl CPU
 				}
 				self.set_reg8(r, v);
 				self.set_flag(CPUFlag::Carry, set_carry);
-				self.update_flags(r)
-			}
+				self.update_flags8(r)
+			},
+
+			Rrc(r) =>
+			{
+				let mut v = self.get_reg8(r);
+				let set_carry = v & 1 == 1;
+				v = v >> 1;
+				if set_carry
+				{
+					v |= 0x80;
+				}
+				self.set_reg8(r, v);
+				self.set_flag(CPUFlag::Carry, set_carry);
+				self.update_flags8(r)
+			},
+
+			Sra(r) =>
+			{
+				let mut v = self.get_reg8(r);
+				let set_carry = v & 1 == 1;
+				v = v >> 1;
+				self.set_reg8(r, v);
+				self.set_flag(CPUFlag::Carry, set_carry);
+				self.update_flags8(r)
+			},
 
 			Srl(r) =>
 			{
@@ -399,7 +585,7 @@ impl CPU
 				v = v >> 1;
 				self.set_reg8(r, v);
 				self.set_flag(CPUFlag::Carry, set_carry);
-				self.update_flags(r)
+				self.update_flags8(r)
 			},
 
 			Bit(n, r) =>
@@ -407,6 +593,12 @@ impl CPU
 				let v = self.get_reg8(r);
 				let f = v & (1 << n) == (1 << n);
 				self.set_flag(CPUFlag::Zero, !f);
+			},
+
+			Swap(r) =>
+			{
+				let v = self.get_reg8(r);
+				self.set_reg8(r, (v & 0xf0 >> 4) | ((v & 0x0f) << 4) );
 			},
 
 			HiReadImm(off) =>
@@ -427,6 +619,8 @@ impl CPU
 
 			Push(reg) => { let v = self.get_reg16(reg); self.push(v); },
 			Pop(reg) => { let v = self.pop(); self.set_reg16(reg, v); },
+
+			Daa() => (),
 
 			SetInterruptFlag(val) => self.interrupts_enabled = val,
 			Instr::Invalid(aa) => panic!("Invalid instr 0x{:x} at pc {:x}", aa, self.regs.pc),
@@ -449,7 +643,9 @@ impl CPU
 		match i
 		{
 			0x00 => Nop(),
-
+			0x07 => RlcA(),
+			0x0f => RrcA(),
+			0x08 => StoreDerefSp(Reg16::SP, self.read16(self.regs.pc + 1)),
 			// load imm 16
 			0x01 | 0x11 | 0x21 | 0x31 => LoadImm16(reg16_lut[((i & 0xf0) >> 4) as usize], self.read16(self.regs.pc + 1)),
 
@@ -466,17 +662,25 @@ impl CPU
 
 			0x0e | 0x1e | 0x2e | 0x3e => LoadImm8(reg_lut[(((i & 0xf0) >> 4) * 2 + 1) as usize], self.read8(self.regs.pc + 1)),
 
+			0x2 =>  StoreDeref8(Reg16::BC, Reg8::A, InstrFlag::None),
 			0x12 => StoreDeref8(Reg16::DE, Reg8::A, InstrFlag::None),
 
-			0x17 => Rl(Reg8::A),
+			0x17 => RlA(),
 			0x18 => Jr(self.read8(self.regs.pc + 1)),
-			0x1f => Rr(Reg8::A),
+			0x1f => RrA(),
 
 			0x20 => JrFlag(self.read8(self.regs.pc + 1), CPUFlag::Zero, false),
 			0x30 => JrFlag(self.read8(self.regs.pc + 1), CPUFlag::Carry, false),
 
+			0x27 => Daa(),
 			0x28 => JrFlag(self.read8(self.regs.pc + 1), CPUFlag::Zero, true),
+			0x9 | 0x19 | 0x29 | 0x39 => Add16(Reg16::HL, reg16_lut[((i & 0xf0) >> 4) as usize]),
+			0x2f => Not(Reg8::A),
+			0x3f => NotCarry(),
+			0x37 => SetCarry(),
+			0x38 => JrFlag(self.read8(self.regs.pc + 1), CPUFlag::Carry, true),
 
+			0xc2 => JpFlag(self.read16(self.regs.pc + 1), CPUFlag::Zero, false),
 			0xc3 => Jp(self.read16(self.regs.pc + 1)),
 			// \/ gameboy specific ldi (HL), A / ldi A, (HL)
 			0x22 => StoreDeref8(Reg16::HL, Reg8::A, InstrFlag::Inc),
@@ -519,6 +723,7 @@ impl CPU
 			0xb0...0xb7 => Or(reg_lut[(i&0x0f) as usize]),
 			0xb8...0xbf => Cp(reg_lut[(i&0x0f - 8) as usize]),
 
+			0xc0 => RetFlag(CPUFlag::Zero, false),
 			0xc1 | 0xd1 | 0xe1 => Pop(reg16_lut[(((i&0xf0) >> 4)- 0xc) as usize]),
 			0xf1 => Pop(Reg16::AF),
 
@@ -533,6 +738,7 @@ impl CPU
 			0xe6 => AndImm(self.read8(self.regs.pc + 1)),
 			0xf6 => OrImm(self.read8(self.regs.pc + 1)),
 
+			0xc8 => RetFlag(CPUFlag::Zero, true),
 			0xc9 => Ret(),
 			0xcb => 
 			{
@@ -556,13 +762,29 @@ impl CPU
 										n += (i & 0x0f) / 8;
 										Bit(n, reg_lut[((i&0x0f) % 8) as usize])
 									},
+
+					0x80...0xbf =>  {
+										let mut n = (((i & 0xf0) >> 4) - 8) * 2;
+										n += (i & 0x0f) / 8;
+										Bit(n, reg_lut[((i&0x0f) % 8) as usize])
+									},
+
+					0xc0...0xff =>  {
+										let mut n = (((i & 0xf0) >> 4) - 0xc) * 2;
+										n += (i & 0x0f) / 8;
+										Bit(n, reg_lut[((i&0x0f) % 8) as usize])
+									},
+
 					_ => Instr::Invalid(0xcb00 | i as u16)
 				}
 			},
 
-			
 			0xcd => Call(self.read16(self.regs.pc + 1)),
+			0xce => AddCarryImm(self.read8(self.regs.pc + 1)),
 
+			0xd0 => RetFlag(CPUFlag::Carry, false),
+			0xd8 => RetFlag(CPUFlag::Carry, true),
+			0xde => SubCarryImm(self.read8(self.regs.pc + 1)),
 			0xe0 => HiWriteImm(self.read8(self.regs.pc + 1)),
 			0xe2 => HiWriteReg(),
 			0xe9 => JpReg(Reg16::HL),
@@ -570,6 +792,7 @@ impl CPU
 			0xee => XorImm(self.read8(self.regs.pc + 1)),
 			0xf0 => HiReadImm(self.read8(self.regs.pc + 1)),
 			0xf3 => SetInterruptFlag(false),
+			0xf9 => LoadReg16(Reg16::HL, Reg16::SP),
 			0xfa => LoadDerefImm(self.read16(self.regs.pc + 1), Reg8::A),
 			0xfb => SetInterruptFlag(true),
 			0xfe => CpImm(self.read8(self.regs.pc + 1)),
@@ -600,7 +823,9 @@ impl CPU
 			0x100 ... 0x3fff => &self.cart,
 			0x4000 ... 0x7fff => &self.cart,
 			0x8000 ... 0x9fff => &self.vram,
+			0xa000 ... 0xbfff => &self.cart_ram,
 			0xc000 ... 0xdfff => &self.wram,
+			0xff01 ... 0xff02 => &self.link_port,
 			0xff04 ... 0xff07 => &self.timer,
 			0xff10...0xff26 => &self.sound,
 			0xff40...0xff49 => &self.ppu,
@@ -617,8 +842,10 @@ impl CPU
 			0x100 ... 0x3fff => &mut self.cart,
 			0x4000 ... 0x7fff => &mut self.cart,
 			0x8000 ... 0x9fff => &mut self.vram,
+			0xa000 ... 0xbfff => &mut self.cart_ram,
 			0xc000 ... 0xdfff => &mut self.wram,
 			0xff04 ... 0xff07 => &mut self.timer,
+			0xff01 ... 0xff02 => &mut self.link_port,
 			0xff10...0xff26 => &mut self.sound,
 			0xff40...0xff49 => &mut self.ppu,
 			0xff80...0xfffe => &mut self.hram,
@@ -632,6 +859,8 @@ impl CPU
 		{
 			0xff0f => self.pending_interrupts,
 			0xffff => self.enabled_interrupts,
+			// Echo RAM
+			0xe000 ... 0xfdff => { let loc_ = loc - 0x2000; self.map(loc_).read8(loc_) },
 			_ => self.map(loc).read8(loc)
 		}
 	}
@@ -643,6 +872,8 @@ impl CPU
 			0xff50 => self.bios_enabled = false,
 			0xff0f => self.pending_interrupts = v,
 			0xffff => self.enabled_interrupts = v,
+			// Echo RAM
+			0xe000 ... 0xfdff => { let loc_ = loc - 0x2000; self.map_mut(loc_).write8(loc_, v) },
 			_ => self.map_mut(loc).write8(loc, v)
 		}
 	}
@@ -670,6 +901,9 @@ impl CPU
 		let mut hram = Vec::with_capacity(0x7f);
 		hram.resize(0x7f, 0);
 
+		let mut cram = Vec::with_capacity(0x2000);
+		cram.resize(0x2000, 0);
+
 		let mut c = CPU
 		{
 			regs: CPURegs{a: 0, b: 0, c: 0, d: 0, e: 0, h: 0, l: 0, f: 0, sp: 0, pc: 0},
@@ -678,6 +912,7 @@ impl CPU
 			wram: RAMBlock { base: 0xc000, v: wram}, // 8k wram
 			hram: RAMBlock { base: 0xff80, v: hram},
 			cart: None,
+			cart_ram: Some(RAMBlock {base: 0xa000, v: cram}),
 			bios: None,
 			bios_enabled: true,
 			interrupts_enabled: false,
@@ -686,6 +921,7 @@ impl CPU
 			ppu: PPU {lcdc: 0, scanline: 0, scroll_x: 0, scroll_y: 0, palette: 0},
 			sound: Sound{},
 			timer: Timer{div_ticks: 0, counter: 0, modulo: 0, ctrl: 0, last_time: 0},
+			link_port: Serial{clock: 0}
 		};
 
 		c
@@ -749,9 +985,15 @@ impl CPU
 		}
 	}
 
-	fn update_flags(&mut self, r: Reg8)
+	fn update_flags8(&mut self, r: Reg8)
 	{
 		let v = self.get_reg8(r);
+		self.set_flag(CPUFlag::Zero, v==0);
+	}
+
+	fn update_flags16(&mut self, r: Reg16)
+	{
+		let v = self.get_reg16(r);
 		self.set_flag(CPUFlag::Zero, v==0);
 	}
 
