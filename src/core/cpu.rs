@@ -361,6 +361,7 @@ impl CPU
 			CpImm(imm) => {
 				let v = self.get_reg8(Reg8::A);
 				self.set_flag(CPUFlag::Zero, v == imm);	
+				self.set_flag(CPUFlag::Carry, v < imm); // overflow WOULD occur if v < imm.
 			}
 
 			AddImm(imm) =>
@@ -428,7 +429,7 @@ impl CPU
 				let v = self.get_reg8(Reg8::A);
 				let res = v.wrapping_sub(imm);
 
-				self.set_flag(CPUFlag::Carry, res < v);
+				self.set_flag(CPUFlag::Carry, res > v);
 
 				self.set_reg8(Reg8::A, res);
 				self.update_flags8(Reg8::A)
@@ -480,7 +481,7 @@ impl CPU
 			XorImm(imm) => { let v = self.get_reg8(Reg8::A); self.set_reg8(Reg8::A, v ^ imm); self.update_flags8(Reg8::A)},
 			Or(r) => { let v = self.get_reg8(Reg8::A); let vv = self.get_reg8(r); self.set_reg8(Reg8::A, v | vv); self.update_flags8(Reg8::A) },
 			OrImm(imm) => { let v = self.get_reg8(Reg8::A); self.set_reg8(Reg8::A, v | imm); self.update_flags8(Reg8::A) },
-			Cp(r) => { let v = self.get_reg8(Reg8::A); let vv = self.get_reg8(r); self.set_flag(CPUFlag::Zero, v == vv); },
+			Cp(r) => { let v = self.get_reg8(Reg8::A); let vv = self.get_reg8(r); self.set_flag(CPUFlag::Zero, v == vv); self.set_flag(CPUFlag::Carry, v < vv); },
 
 			Not(r) =>
 			{
@@ -792,7 +793,7 @@ impl CPU
 			0xee => XorImm(self.read8(self.regs.pc + 1)),
 			0xf0 => HiReadImm(self.read8(self.regs.pc + 1)),
 			0xf3 => SetInterruptFlag(false),
-			0xf9 => LoadReg16(Reg16::HL, Reg16::SP),
+			0xf9 => LoadReg16(Reg16::SP, Reg16::HL),
 			0xfa => LoadDerefImm(self.read16(self.regs.pc + 1), Reg8::A),
 			0xfb => SetInterruptFlag(true),
 			0xfe => CpImm(self.read8(self.regs.pc + 1)),
