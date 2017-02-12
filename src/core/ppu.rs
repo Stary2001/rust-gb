@@ -3,10 +3,16 @@ use core::mem::MemBlock;
 pub struct PPU
 {
 	pub lcdc: u8,
+	pub stat: u8,
 	pub scanline: u8,
 	pub scroll_x: u8,
 	pub scroll_y: u8,
-	pub palette: u8
+	pub lyc: u8,
+	pub wx: u8,
+	pub wy: u8,
+	pub bg_palette: u8,
+	pub obj0_palette: u8,
+	pub obj1_palette: u8
 }
 
 impl PPU
@@ -34,10 +40,17 @@ impl MemBlock for PPU
 		match loc - 0xff40
 		{
 			0 => self.lcdc,
+			1 => self.stat,
 			2 => self.scroll_y,
 			3 => self.scroll_x,
 			4 => self.scanline,
-			7 => self.palette,
+			5 => self.lyc,
+
+			7 => self.bg_palette,
+			8 => self.obj0_palette,
+			9 => self.obj1_palette,
+			0xa => self.wy,
+			0xb => self.wx - 7,
 			_ => 0
 		}
 	}
@@ -48,11 +61,16 @@ impl MemBlock for PPU
 		match loc - 0xff40
 		{
 			0 => self.lcdc = v,
+			1 => self.stat = v,
 			2 => self.scroll_y = v,
 			3 => self.scroll_x = v,
 			4 => panic!("write to y-coord reg"),
-			7 => self.palette = v,
-			_ => panic!("unimplemented ppu write")
+			7 => self.bg_palette = v,
+			8 => self.obj0_palette = v,
+			9 => self.obj1_palette = v,
+			0xa => self.wy = v,
+			0xb => self.wx = v + 7,
+			_ => panic!("unimplemented ppu write {:x}", loc)
 		};
 	}
 }

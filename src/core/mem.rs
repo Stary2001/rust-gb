@@ -45,6 +45,9 @@ impl MemBlock for ROMBlock
 	{
 		self.v[loc as usize - self.base]
 	}
+
+	fn write8(&mut self, loc: u16, v: u8)
+	{}
 }
 
 impl MemBlock for Option<ROMBlock>
@@ -56,10 +59,11 @@ impl MemBlock for Option<ROMBlock>
 			Some(ref v) => v.v[loc as usize - v.base],
 			None => panic!("No ROM!")
 		}
-		
 	}
-}
 
+	fn write8(&mut self, loc: u16, v: u8)
+	{}
+}
 
 impl MemBlock for Option<RAMBlock>
 {

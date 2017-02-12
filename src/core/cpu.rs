@@ -7,6 +7,7 @@ use core::ppu::PPU;
 use core::sound::Sound;
 use core::timer::Timer;
 use core::serial::Serial;
+use core::joypad::Joypad;
 
 struct CPURegs
 {
@@ -29,6 +30,7 @@ pub struct CPU
 	pub vram: RAMBlock,
 	pub wram: RAMBlock,
 	pub hram: RAMBlock,
+	pub oam: RAMBlock,
 	pub cart: Option<ROMBlock>,
 	pub cart_ram: Option<RAMBlock>,
 	pub bios: Option<ROMBlock>, // BIOS will shadow the first part of cart when enabled
@@ -38,6 +40,7 @@ pub struct CPU
 	pub ppu: PPU,
 	pub timer: Timer,
 	pub link_port: Serial,
+	pub joy: Joypad,
 	pub pending_interrupts: u8,
 	pub enabled_interrupts: u8,
 }
@@ -106,6 +109,7 @@ pub enum Instr
 	AddCarry(Reg8),
 	AddCarryImm(u8),
 	Add16(Reg16, Reg16),
+	Add16Imm(Reg16, u8),
 	Sub(Reg8),
 	SubImm(u8),
 	SubCarry(Reg8),
@@ -137,9 +141,11 @@ pub enum Instr
 	Bit(u8, Reg8),
 	Res(u8, Reg8),
 
+	Rst(u16),
 	Call(u16),
 	CallFlag(u16, CPUFlag, bool),
 	Ret(),
+	RetI(),
 	RetFlag(CPUFlag, bool),
 	Jr(u8),
 	JrFlag(u8, CPUFlag, bool),
@@ -149,6 +155,7 @@ pub enum Instr
 
 	Push(Reg16),
 	Pop(Reg16),
+	Peek(u8),
 
 	Halt(),
 	SetInterruptFlag(bool),
@@ -183,11 +190,13 @@ impl Instr
 			Bit(_, _) => 2,
 
 			StoreDerefSp(_, _) => 3,
+			Rst(_) => 1,
 			Call(_) | CallFlag(_, _, _) => 3,
-			AddImm(_) | AddCarryImm(_) | SubImm(_) | AndImm(_) | OrImm(_) | XorImm(_) | CpImm(_) => 2,
+			AddImm(_) | Add16Imm(_, _) | AddCarryImm(_) | SubImm(_) | AndImm(_) | OrImm(_) | XorImm(_) | CpImm(_) => 2,
 			LoadDerefImm(_, _) |
 			StoreDerefImm(_, _) => 3,
 			HiReadImm(_) | HiWriteImm(_) => 2,
+			Peek(_) => 2,
 			_ => 1
 		}
 	}
@@ -200,6 +209,8 @@ impl CPU
 	pub fn exec(&mut self, i: Instr)
 	{
 		let mut jumped: bool = false;
+
+		//println!("{:x} {:?}", self.regs.pc, i);
 
 		match i
 		{
@@ -279,7 +290,7 @@ impl CPU
 				}
 			},
 
-			Call(off) =>
+			Rst(off) | Call(off) =>
 			{
 				let pc = self.regs.pc;
 				self.push(pc + 3);
@@ -299,6 +310,14 @@ impl CPU
 
 			Ret() =>
 			{
+				let pc = self.pop();
+				self.regs.pc = pc;
+				jumped = true;
+			},
+
+			RetI() =>
+			{
+				self.interrupts_enabled = true;
 				let pc = self.pop();
 				self.regs.pc = pc;
 				jumped = true;
@@ -422,7 +441,17 @@ impl CPU
 				self.set_flag(CPUFlag::Carry, res < v);
 				self.set_reg16(dst, res);
 				self.update_flags16(dst)
-			}
+			},
+
+			Add16Imm(dst, imm) =>
+			{
+				let v = self.get_reg16(dst);
+				let res = v.wrapping_add(imm as u16);
+
+				self.set_flag(CPUFlag::Carry, res < v);
+				self.set_reg16(dst, res);
+				self.update_flags16(dst)
+			},
 
 			SubImm(imm) =>
 			{
@@ -620,7 +649,14 @@ impl CPU
 
 			Push(reg) => { let v = self.get_reg16(reg); self.push(v); },
 			Pop(reg) => { let v = self.pop(); self.set_reg16(reg, v); },
-
+			Peek(imm) =>
+			{
+				let sp = self.get_reg16(Reg16::SP);
+				let res = sp.wrapping_add(imm as u16);
+				self.set_reg16(Reg16::HL, sp);
+				self.set_flag(CPUFlag::Carry, res < sp);
+				self.update_flags16(Reg16::HL)
+			}
 			Daa() => (),
 
 			SetInterruptFlag(val) => self.interrupts_enabled = val,
@@ -734,13 +770,32 @@ impl CPU
 			0xc4 => CallFlag(self.read16(self.regs.pc + 1), CPUFlag::Zero, false),
 			0xd4 => CallFlag(self.read16(self.regs.pc + 1), CPUFlag::Carry, false),
 
+			0xcc => CallFlag(self.read16(self.regs.pc + 1), CPUFlag::Zero, true),
+			0xdc => CallFlag(self.read16(self.regs.pc + 1), CPUFlag::Carry, true),
+
 			0xc6 => AddImm(self.read8(self.regs.pc + 1)),
 			0xd6 => SubImm(self.read8(self.regs.pc + 1)),
 			0xe6 => AndImm(self.read8(self.regs.pc + 1)),
 			0xf6 => OrImm(self.read8(self.regs.pc + 1)),
 
+
+			0xe8 => Add16Imm(Reg16::SP, self.read8(self.regs.pc + 1)),
+
 			0xc8 => RetFlag(CPUFlag::Zero, true),
 			0xc9 => Ret(),
+			0xd9 => RetI(),
+
+			0xc7 => Rst(0),
+			0xd7 => Rst(0x10),
+			0xe7 => Rst(0x20),
+			0xf7 => Rst(0x30),
+
+			0xcf => Rst(0x8),
+			0xdf => Rst(0x18),
+			0xef => Rst(0x28),
+			0xff => Rst(0x38),
+
+			0xca => JpFlag(self.read16(self.regs.pc + 1), CPUFlag::Zero, true),
 			0xcb => 
 			{
 				let i = self.read8(self.regs.pc + 1);
@@ -784,7 +839,9 @@ impl CPU
 			0xce => AddCarryImm(self.read8(self.regs.pc + 1)),
 
 			0xd0 => RetFlag(CPUFlag::Carry, false),
+			0xd2 => JpFlag(self.read16(self.regs.pc + 1), CPUFlag::Carry, false),
 			0xd8 => RetFlag(CPUFlag::Carry, true),
+			0xda => JpFlag(self.read16(self.regs.pc + 1), CPUFlag::Carry, true),
 			0xde => SubCarryImm(self.read8(self.regs.pc + 1)),
 			0xe0 => HiWriteImm(self.read8(self.regs.pc + 1)),
 			0xe2 => HiWriteReg(),
@@ -793,6 +850,7 @@ impl CPU
 			0xee => XorImm(self.read8(self.regs.pc + 1)),
 			0xf0 => HiReadImm(self.read8(self.regs.pc + 1)),
 			0xf3 => SetInterruptFlag(false),
+			0xf8 => Peek(self.read8(self.regs.pc + 1)),
 			0xf9 => LoadReg16(Reg16::SP, Reg16::HL),
 			0xfa => LoadDerefImm(self.read16(self.regs.pc + 1), Reg8::A),
 			0xfb => SetInterruptFlag(true),
@@ -826,10 +884,12 @@ impl CPU
 			0x8000 ... 0x9fff => &self.vram,
 			0xa000 ... 0xbfff => &self.cart_ram,
 			0xc000 ... 0xdfff => &self.wram,
+			0xfe00 ... 0xfe9f => &self.oam,
+			0xff00 => &self.joy,
 			0xff01 ... 0xff02 => &self.link_port,
 			0xff04 ... 0xff07 => &self.timer,
 			0xff10...0xff26 => &self.sound,
-			0xff40...0xff49 => &self.ppu,
+			0xff40...0xff4b => &self.ppu,
 			0xff80...0xfffe => &self.hram,
 			_ => panic!("unmapped mem access at 0x{:x}", loc)
 		}
@@ -845,10 +905,12 @@ impl CPU
 			0x8000 ... 0x9fff => &mut self.vram,
 			0xa000 ... 0xbfff => &mut self.cart_ram,
 			0xc000 ... 0xdfff => &mut self.wram,
-			0xff04 ... 0xff07 => &mut self.timer,
+			0xfe00 ... 0xfe9f => &mut self.oam,
+			0xff00 => &mut self.joy,
 			0xff01 ... 0xff02 => &mut self.link_port,
+			0xff04 ... 0xff07 => &mut self.timer,
 			0xff10...0xff26 => &mut self.sound,
-			0xff40...0xff49 => &mut self.ppu,
+			0xff40...0xff4b => &mut self.ppu,
 			0xff80...0xfffe => &mut self.hram,
 			_ => panic!("unmapped mem access at 0x{:x}", loc)
 		}
@@ -862,6 +924,8 @@ impl CPU
 			0xffff => self.enabled_interrupts,
 			// Echo RAM
 			0xe000 ... 0xfdff => { let loc_ = loc - 0x2000; self.map(loc_).read8(loc_) },
+			0xfea0...0xfeff => 0,
+			0xff7f => 0xff,
 			_ => self.map(loc).read8(loc)
 		}
 	}
@@ -875,6 +939,8 @@ impl CPU
 			0xffff => self.enabled_interrupts = v,
 			// Echo RAM
 			0xe000 ... 0xfdff => { let loc_ = loc - 0x2000; self.map_mut(loc_).write8(loc_, v) },
+			0xfea0...0xfeff => (),
+			0xff7f => (),
 			_ => self.map_mut(loc).write8(loc, v)
 		}
 	}
@@ -901,17 +967,19 @@ impl CPU
 		wram.resize(0x2000, 0);
 		let mut hram = Vec::with_capacity(0x7f);
 		hram.resize(0x7f, 0);
-
 		let mut cram = Vec::with_capacity(0x2000);
 		cram.resize(0x2000, 0);
+		let mut oam = Vec::with_capacity(0x100);
+		oam.resize(0x100, 0);
 
 		let mut c = CPU
 		{
 			regs: CPURegs{a: 0, b: 0, c: 0, d: 0, e: 0, h: 0, l: 0, f: 0, sp: 0, pc: 0},
 
-			vram: RAMBlock { base: 0x8000, v: vram}, // 8k vram
-			wram: RAMBlock { base: 0xc000, v: wram}, // 8k wram
-			hram: RAMBlock { base: 0xff80, v: hram},
+			vram: RAMBlock { base: 0x8000, v: vram }, // 8k vram
+			wram: RAMBlock { base: 0xc000, v: wram }, // 8k wram
+			hram: RAMBlock { base: 0xff80, v: hram },
+			oam: RAMBlock { base: 0xfe00, v: oam },
 			cart: None,
 			cart_ram: Some(RAMBlock {base: 0xa000, v: cram}),
 			bios: None,
@@ -919,10 +987,11 @@ impl CPU
 			interrupts_enabled: false,
 			pending_interrupts: 0,
 			enabled_interrupts: 0,
-			ppu: PPU {lcdc: 0, scanline: 0, scroll_x: 0, scroll_y: 0, palette: 0},
+			ppu: PPU {lcdc: 0, stat: 0, scanline: 0, scroll_x: 0, scroll_y: 0, lyc: 0, bg_palette: 0, obj0_palette: 0, obj1_palette: 0, wx: 0, wy: 0},
 			sound: Sound{},
 			timer: Timer{div_ticks: 0, counter: 0, modulo: 0, ctrl: 0, last_time: 0},
-			link_port: Serial{clock: 0}
+			link_port: Serial{clock: 0},
+			joy: Joypad{}
 		};
 
 		c
