@@ -973,7 +973,7 @@ impl CPU
 		let mut display_buffer = Vec::with_capacity(160 * 144);
 		display_buffer.resize(160 * 144, 0);
 
-		let mut c = CPU
+		let c = CPU
 		{
 			regs: CPURegs{a: 0, b: 0, c: 0, d: 0, e: 0, h: 0, l: 0, f: 0, sp: 0, pc: 0},
 

@@ -5,7 +5,7 @@ pub trait MemBlock
 		panic!("unhandled 8-bit read at 0x{:x}!", loc);
 	}
 
-	fn write8(&mut self, loc: u16, v: u8)
+	fn write8(&mut self, loc: u16, _: u8)
 	{
 		panic!("unhandled 8-bit write at 0x{:x}!", loc);
 	}
@@ -43,7 +43,7 @@ impl MemBlock for ROMBlock
 		self.v[loc as usize - self.base]
 	}
 
-	fn write8(&mut self, loc: u16, v: u8)
+	fn write8(&mut self, _: u16, _: u8)
 	{}
 }
 
@@ -58,7 +58,7 @@ impl MemBlock for Option<ROMBlock>
 		}
 	}
 
-	fn write8(&mut self, loc: u16, v: u8)
+	fn write8(&mut self, _: u16, _: u8)
 	{}
 }
 

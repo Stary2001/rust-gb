@@ -1,5 +1,4 @@
 use core::mem::MemBlock;
-use core::cpu::CPU;
 use core::mem::RAMBlock;
 
 pub struct Display
@@ -85,8 +84,6 @@ impl PPU
 	fn render_tile(&mut self, x: isize, y: isize, tile_no: usize, clip_x: isize, clip_y: isize)
 	{
 		let tiledata_off = if self.lcdc & 1 << 4 == 1 << 4 { 0x8000 } else { 0x8800 };
-		let mut tile_x = 0;
-		let mut tile_y = 0;
 
 		for i in clip_y..8
 		{

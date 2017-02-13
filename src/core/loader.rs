@@ -9,9 +9,9 @@ pub fn load_from_file(name: &str) -> Option<ROMBlock>
 		Ok(mut f) =>
 		{
 			let mut v: Vec<u8> = Vec::new();
-			let s: usize = f.read_to_end(&mut v).unwrap();
+			let _ = f.read_to_end(&mut v).unwrap();
 			Some(ROMBlock {base: 0, v: v})
 		},
-		Err(e) => None,
+		Err(_) => None,
 	}
 }

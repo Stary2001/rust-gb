@@ -1,6 +1,3 @@
-#![feature(step_by)]
-
-
 mod core;
 mod sdl;
 use sdl::window::SDLWindow;
