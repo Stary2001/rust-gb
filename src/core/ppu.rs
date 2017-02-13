@@ -57,8 +57,6 @@ impl PPU
 			println!("BG enabled!");
 			let bg_tilemap_off = if self.lcdc & 1 << 3 == 1 << 3 { 0x9c00 } else { 0x9800 };
 
-			let mut clipx = self.scroll_x as isize % 8;
-			let mut clipy = self.scroll_y as isize % 8;
 			let xoff = self.scroll_x as isize;
 			let yoff = self.scroll_y as isize;
 
@@ -75,28 +73,10 @@ impl PPU
 
 					let scr_x = (x%32)*8 - xoff;
 					let scr_y = (y%32)*8 - yoff;
-					if scr_x < 0
-					{
-						clipx = -scr_x;
-					}
-					else
-					{
-						clipx = 0;
-					}
-
-					if scr_y < 0
-					{
-						clipy = -scr_y;
-					}
-					else
-					{
-						clipy = 0;
-					}
+					let clipx = if scr_x < 0 { -scr_x } else { 0 };
+					let clipy = if scr_y < 0 { -scr_y } else { 0 };
 
 					self.render_tile(scr_x, scr_y, tile_no as usize, clipx, clipy);
-
-					clipx = 0;
-					clipy = 0;
 				}
 			}
 		}
@@ -108,7 +88,7 @@ impl PPU
 		let mut tile_x = 0;
 		let mut tile_y = 0;
 
-		for i in (clip_y..8)
+		for i in clip_y..8
 		{
 			let tile_upper = self.vram.read8(tiledata_off + (tile_no as u16) * 16 + (i*2) as u16);
 			let tile_lower = self.vram.read8(tiledata_off + (tile_no as u16) * 16 + (i*2) as u16 + 1);
