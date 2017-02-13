@@ -1,9 +1,9 @@
 use core::mem::MemBlock;
 use core::mem::RAMBlock;
 use core::mem::ROMBlock;
-use core::mem::EmptyBlock;
 
 use core::ppu::PPU;
+use core::ppu::Display;
 use core::sound::Sound;
 use core::timer::Timer;
 use core::serial::Serial;
@@ -27,10 +27,8 @@ struct CPURegs
 pub struct CPU
 {
 	regs: CPURegs,
-	pub vram: RAMBlock,
 	pub wram: RAMBlock,
 	pub hram: RAMBlock,
-	pub oam: RAMBlock,
 	pub cart: Option<ROMBlock>,
 	pub cart_ram: Option<RAMBlock>,
 	pub bios: Option<ROMBlock>, // BIOS will shadow the first part of cart when enabled
@@ -881,10 +879,10 @@ impl CPU
 			0...0xff => { if self.bios_enabled { &self.bios } else { &self.cart } }
 			0x100 ... 0x3fff => &self.cart,
 			0x4000 ... 0x7fff => &self.cart,
-			0x8000 ... 0x9fff => &self.vram,
+			0x8000 ... 0x9fff => &self.ppu.vram,
 			0xa000 ... 0xbfff => &self.cart_ram,
 			0xc000 ... 0xdfff => &self.wram,
-			0xfe00 ... 0xfe9f => &self.oam,
+			0xfe00 ... 0xfe9f => &self.ppu.oam,
 			0xff00 => &self.joy,
 			0xff01 ... 0xff02 => &self.link_port,
 			0xff04 ... 0xff07 => &self.timer,
@@ -902,10 +900,10 @@ impl CPU
 			0...0xff => { if self.bios_enabled { &mut self.bios } else { &mut self.cart } }
 			0x100 ... 0x3fff => &mut self.cart,
 			0x4000 ... 0x7fff => &mut self.cart,
-			0x8000 ... 0x9fff => &mut self.vram,
+			0x8000 ... 0x9fff => &mut self.ppu.vram,
 			0xa000 ... 0xbfff => &mut self.cart_ram,
 			0xc000 ... 0xdfff => &mut self.wram,
-			0xfe00 ... 0xfe9f => &mut self.oam,
+			0xfe00 ... 0xfe9f => &mut self.ppu.oam,
 			0xff00 => &mut self.joy,
 			0xff01 ... 0xff02 => &mut self.link_port,
 			0xff04 ... 0xff07 => &mut self.timer,
@@ -972,14 +970,15 @@ impl CPU
 		let mut oam = Vec::with_capacity(0x100);
 		oam.resize(0x100, 0);
 
+		let mut display_buffer = Vec::with_capacity(160 * 144);
+		display_buffer.resize(160 * 144, 0);
+
 		let mut c = CPU
 		{
 			regs: CPURegs{a: 0, b: 0, c: 0, d: 0, e: 0, h: 0, l: 0, f: 0, sp: 0, pc: 0},
 
-			vram: RAMBlock { base: 0x8000, v: vram }, // 8k vram
 			wram: RAMBlock { base: 0xc000, v: wram }, // 8k wram
 			hram: RAMBlock { base: 0xff80, v: hram },
-			oam: RAMBlock { base: 0xfe00, v: oam },
 			cart: None,
 			cart_ram: Some(RAMBlock {base: 0xa000, v: cram}),
 			bios: None,
@@ -987,7 +986,16 @@ impl CPU
 			interrupts_enabled: false,
 			pending_interrupts: 0,
 			enabled_interrupts: 0,
-			ppu: PPU {lcdc: 0, stat: 0, scanline: 0, scroll_x: 0, scroll_y: 0, lyc: 0, bg_palette: 0, obj0_palette: 0, obj1_palette: 0, wx: 0, wy: 0},
+			ppu: PPU
+				{
+					lcdc: 0, stat: 0, scanline: 0, scroll_x: 0, scroll_y: 0, lyc: 0, bg_palette_reg: 0, obj0_palette_reg: 0, obj1_palette_reg: 0, wx: 0, wy: 0,
+					vram: RAMBlock { base: 0x8000, v: vram }, // 8k vram
+					oam: RAMBlock { base: 0xfe00, v: oam },
+					display: Display {width: 160, height: 144, data: display_buffer, bpp: 8},
+					bg_palette: vec!{0,0,0,0},
+					obj0_palette: vec!{0,0,0,0},
+					obj1_palette: vec!{0,0,0,0}
+				},
 			sound: Sound{},
 			timer: Timer{div_ticks: 0, counter: 0, modulo: 0, ctrl: 0, last_time: 0},
 			link_port: Serial{clock: 0},

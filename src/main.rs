@@ -1,3 +1,6 @@
+#![feature(step_by)]
+
+
 mod core;
 mod sdl;
 use sdl::window::SDLWindow;
@@ -30,7 +33,8 @@ fn main()
 			c.exec(instr);
 		}
 
-		w.do_frame();
+		c.ppu.end_frame();
+		w.do_frame(&c.ppu);
 		w.process_events();
 		if w.should_quit()
 		{

@@ -23,9 +23,6 @@ pub struct ROMBlock
 	pub v: Vec<u8>
 }
 
-pub struct EmptyBlock
-{}
-
 impl MemBlock for RAMBlock
 {
 	fn read8(&self, loc: u16) -> u8
@@ -77,6 +74,3 @@ impl MemBlock for Option<RAMBlock>
 		
 	}
 }
-
-impl MemBlock for EmptyBlock
-{}
